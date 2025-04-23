@@ -1,106 +1,477 @@
 import asyncio
+import json
 from pydantic import BaseModel, Field
-from typing import List, Dict, Any
+from typing import List, Dict, Any, Optional, Literal
 
-from agents import Agent, Runner, trace, ItemHelpers
+from agents import Agent, Runner, trace, ItemHelpers, input_guardrail, GuardrailFunctionOutput, RunContextWrapper, InputGuardrailTripwireTriggered
 from agents.tool import WebSearchTool
-from agents.extensions.visualization import draw_graph
 from agents import ModelSettings
+from agents.extensions.visualization import draw_graph
 
-class ParameterEstimate(BaseModel):
-    """Parameter estimate with name, value and confidence interval"""
+class ParameterMeta(BaseModel):
+    """Parameter metadata defining what to estimate"""
     name: str = Field(description="Name of the parameter")
+    description: str = Field(description="Description of what this parameter represents")
+    scale_description: str = Field(description="Description of measurement scale (e.g., '0-10 where 0 means no willingness and 10 means complete commitment')")
+    interacts_with: Optional[List[str]] = Field(
+        description="Names of other parameters this parameter interacts with", 
+    )
+    interaction_type: Optional[Literal["none", "additive", "multiplicative", "weak_exponential", "strong_exponential"]] = Field(
+        description="How this parameter interacts with other parameters",
+    )
+    interaction_description: Optional[str] = Field(
+        description="Description of how this parameter interacts with others",
+    )
+
+class ParameterSample(BaseModel):
+    """Parameter estimates with value and confidence interval"""
+    name: str = Field(description="Name of the parameter (must match a ParameterMeta)")
     value: float = Field(description="Estimated value")
     low: float = Field(description="Lower bound of 90% confidence interval")
     high: float = Field(description="Upper bound of 90% confidence interval")
     reasoning: str = Field(description="Reasoning for this estimate")
+    sources: List[str] = Field(description="Sources supporting this estimate", default_factory=list)
+
+class ReferenceClassOutput(BaseModel):
+    """Output format for reference class forecasting"""
+    base_rate: float = Field(description="Historical base rate/frequency of similar events")
+    low: float = Field(description="Lower bound of 90% confidence interval for base rate")
+    high: float = Field(description="Upper bound of 90% confidence interval for base rate")
+    reference_class_description: str = Field(description="Description of the reference class used")
+    sample_size: int = Field(description="Size of the reference class (number of historical examples)")
+    bibliography: List[str] = Field(description="Citations for historical data sources")
+    reasoning: str = Field(description="Reasoning for selecting this reference class")
 
 
 class ForecastParameters(BaseModel):
     """Output format for forecast parameters"""
     question: str = Field(description="Original forecasting question")
-    parameters: List[ParameterEstimate] = Field(description="List of parameters to estimate")
+    parameters: List[ParameterMeta] = Field(description="Parameter specifications to estimate")
     additional_considerations: List[str] = Field(description="Additional factors to consider")
 
 
-parameter_estimator_agent = Agent(
-    name="Parameter Estimator",
-    instructions="""You help users break down forecasting questions into key parameters that need to be estimated.
+class FinalForecast(BaseModel):
+    """Final forecast output combining base rate with parameter adjustments"""
+    question: str = Field(description="Forecast question")
+    final_estimate: float = Field(description="Final probability estimate")
+    final_low: float = Field(description="Lower bound of 90% confidence interval")
+    final_high: float = Field(description="Upper bound of 90% confidence interval")
+    base_rate: float = Field(description="Original base rate used")
+    key_parameters: List[str] = Field(description="Names of most influential parameters")
+    rationale: str = Field(description="Summary rationale for forecast")
+    parameter_samples: List[ParameterSample] = Field(description="All parameter samples used")
+
+
+class ForecastabilityCheck(BaseModel):
+    """Output format for checking if a question is forecastable"""
+    is_forecastable: bool = Field(description="Whether the question can be reasonably forecasted")
+    reasoning: str = Field(description="Reasoning for the decision")
+
+
+class QuestionClarification(BaseModel):
+    """Output format for question clarification"""
+    original_question: str = Field(description="The original question")
+    clarified_question: str = Field(description="The clarified, time-bound question")
+    follow_up_questions: List[str] = Field(description="Follow-up questions if clarification is needed")
+    needs_clarification: bool = Field(description="Whether the question needs clarification")
+
+
+class RedTeamOutput(BaseModel):
+    """Output from red team challenge to the forecast"""
+    strongest_objection: str = Field(description="Strongest objection to the forecast")
+    alternate_estimate: float = Field(description="Alternative probability estimate")
+    alternate_low: float = Field(description="Lower bound of alt 90% confidence interval")
+    alternate_high: float = Field(description="Upper bound of alt 90% confidence interval")
+    key_disagreements: List[str] = Field(description="Key points of disagreement with original forecast")
+    rationale: str = Field(description="Rationale for the alternative view")
+
+
+reference_class_agent = Agent(
+    name="Reference Class Finder",
+    instructions="""You identify the appropriate reference class for a forecasting question and determine the historical base rate.
 
 For any forecasting question:
-1. Start with first principles thinking to identify what fundamentally matters
-2. Search extensively for historical data, trends, and analogous situations to inform estimates
-3. Identify 5 key parameters that:
+1. First identify what reference class is most appropriate - the set of similar historical events or situations
+2. Search for historical data on this reference class using the web search tool
+3. Determine the base rate (frequency of occurrence) within this reference class
+4. Provide a 90% confidence interval around this base rate
+5. Document your sources with at least 3 web searches
+6. Explain your reasoning for selecting this reference class
+
+Focus on finding the most relevant historical analogues. Be precise about:
+- Sample size (how many cases in your reference class)
+- Time period covered
+- Any adjustments needed for this specific case
+- Quality and limitations of available data
+
+Example:
+"What is the probability that China will invade Taiwan by 2030?"
+- Reference class: Military invasions of claimed territories by nuclear powers (1950-present)
+- Base rate: 9 invasions out of 37 similar territorial claims (24%)
+- Search for data on historical territorial disputes, nuclear power military actions, etc.
+
+Aim for objective, quantifiable reference classes whenever possible.""",
+    tools=[WebSearchTool()],
+    output_type=ReferenceClassOutput,
+    model="gpt-4.1",
+)
+
+
+parameter_design_agent = Agent(
+    name="Parameter Designer",
+    instructions="""You design the key parameters needed to estimate a forecasting question given a reference class and base rate.
+
+For each forecasting question:
+1. Start with first principles thinking to identify what fundamentally matters to this question
+2. Identify 5 key parameters that:
    - Cover different aspects of the forecast (e.g. market, technology, human factors)
-   - Are measurable and objective
+   - Are measurable and as objective as possible
    - Together give a comprehensive view of what drives the outcome
-4. For each parameter:
-   - Search for relevant historical base rates and data
-   - Provide estimates (value, 90% confidence interval)
-   - Document reasoning, citing data sources and historical examples
-5. Consider extreme scenarios and ways the forecast could be wrong
+   - Would adjust the base rate up or down
+3. For each parameter:
+   - Define a clear, measurable name and description
+   - Provide a clear scale description explaining what the values mean
+   - Identify how this parameter interacts with others (additive, multiplicative, etc.)
+   - Do NOT provide numeric estimates yet - focus on structure only
 
 Focus on parameters that are both measurable and meaningful for modeling the forecast outcome.
 
-Make sure to use the web search tool to find relevant data. This is required. 
-""",
-    tools=[WebSearchTool()],
+Good example parameters:
+- What is the probability that China invades Taiwan by 2030?
+  * China's military capability growth (1-10 scale)
+  * Taiwan's defense capabilities (1-10 scale)
+  * US willingness to intervene (0-100% probability)
+  * Economic interdependence (0-100 index)
+  * CCP domestic political stability (1-10 scale)
+
+The goal is to define parameters that:
+1. Have clear, measurable definitions
+2. Drive the outcome in an understandable way
+3. Can be researched separately""",
     output_type=ForecastParameters,
+    tools=[WebSearchTool()],
+    model="gpt-4.1",
+)
+
+
+parameter_researcher_agent = Agent(
+    name="Parameter Researcher",
+    instructions="""You research a specific forecasting parameter to provide an evidence-based estimate.
+
+For the given parameter:
+1. Run at least 3 web searches to gather relevant data and evidence
+2. Based on the data, estimate:
+   - The most likely value
+   - A 90% confidence interval (10th and 90th percentile)
+3. Cite your sources clearly
+4. Provide concise reasoning for your estimate
+
+Focus on finding objective data wherever possible. If data is limited, use analogous situations or expert judgments from reputable sources.
+
+Keep your reasoning concise and data-driven.""",
+    tools=[WebSearchTool()],
+    output_type=ParameterSample,
+    model="gpt-4.1",
+)
+
+
+synthesis_agent = Agent(
+    name="Forecast Synthesizer",
+    instructions="""You create the final forecast by combining the base rate with parameter estimates.
+
+Starting with:
+1. A base rate from reference class forecasting
+2. Estimates for 5 key parameters with confidence intervals
+
+Your task:
+1. Start with the reference class base rate as your prior
+2. Adjust this probability based on the parameter estimates:
+   - For additive interactions, apply direct adjustments
+   - For multiplicative interactions, apply as multipliers
+   - For exponential interactions, apply appropriate transformations
+3. Determine how each parameter should shift the base rate
+4. Calculate a final probability estimate with 90% confidence interval
+5. Identify the 2 most influential parameters
+6. Write a clear, one-paragraph rationale that references these key parameters
+
+Your final forecast should strike a balance between the outside view (base rate) and the inside view (parameter adjustments). Be explicit about how much weight you give to the base rate versus specific parameters.""",
+    model="gpt-4.1",
+    output_type=FinalForecast,
+)
+
+
+question_validator_agent = Agent(
+    name="Question Validator",
+    instructions="""You determine if a question can be reasonably forecasted.
+
+Valid forecast questions:
+- Ask about future events, trends, or outcomes
+- Can be measured or verified objectively
+- Have a defined timeframe or condition
+- Deal with real-world possibilities
+
+Invalid forecast questions:
+- Basic factual queries like "What is the color of the sky?"
+- Questions about personal preferences or opinions
+- Questions with no objective answer
+- Questions about fictional scenarios with no real-world basis
+- Questions about the past or present (unless projecting forward)
+
+Always provide clear reasoning for your decision.
+""",
+    output_type=ForecastabilityCheck,
+)
+
+
+question_clarifier_agent = Agent(
+    name="Question Clarifier",
+    instructions="""You help users clarify vague forecasting questions into concrete, time-bound questions.
+
+For any input question:
+1. Identify if the question is already well-defined with a clear timeframe and measurable outcome
+2. If not, suggest a more specific formulation with:
+   - A clear timeframe (e.g., "by 2030" or "within the next 3 years")
+   - Measurable criteria for resolution
+   - Objective conditions
+
+Examples:
+- "Will China invade Taiwan?" becomes "What is the probability that China will initiate a military invasion of Taiwan before December 31, 2030?"
+- "Will AI take my job?" becomes "What is the probability that at least 30% of [specific job type] roles will be automated by AI by 2028?"
+
+If you need specific information from the user to properly clarify the question, list specific follow-up questions.
+""",
+    output_type=QuestionClarification,
     model="gpt-4.1-mini",
 )
 
 
+@input_guardrail
+async def forecastability_guardrail(
+    context: RunContextWrapper[None], agent: Agent, input: str
+) -> GuardrailFunctionOutput:
+    """Checks if the user's query is a valid forecastable question."""
+    result = await Runner.run(question_validator_agent, input, context=context.context)
+    check = result.final_output_as(ForecastabilityCheck)
+    
+    return GuardrailFunctionOutput(
+        output_info=check,
+        tripwire_triggered=not check.is_forecastable,
+    )
+
+red_team_agent = Agent(
+    name="Red Team Challenger",
+    instructions="""You challenge the forecast by providing the strongest possible counterargument.
+
+Given a complete forecast with base rate, parameters, and final estimate:
+1. Identify the weakest assumptions in the forecast
+2. Provide the strongest objection to the forecast
+3. Offer an alternative estimate with confidence interval
+4. Explain key points of disagreement
+5. Provide a concise rationale for your alternative view
+
+Focus on:
+- Overlooked reference classes that might be more appropriate
+- Alternative interpretations of the same evidence
+- Important missing parameters
+- Ways the parameter interactions might be misunderstood
+- Cognitive biases that might be affecting the forecast
+
+Your goal is NOT to be contrarian for its own sake, but to provide a genuinely strong alternative view that could improve the forecast.""",
+    output_type=RedTeamOutput,
+    model="gpt-4.1",
+)
+
+
+forecast_orchestrator = Agent(
+    name="Forecast Orchestrator",
+    instructions="""You are the main interface for a forecasting system. Your job is to:
+
+1. Ensure the user's question is appropriate for forecasting
+2. Clarify vague questions into specific, time-bound forecasting questions
+3. Orchestrate the forecasting pipeline:
+   - Find an appropriate reference class and historical base rate
+   - Design key parameters that would adjust this base rate
+   - Research each parameter with evidence 
+   - Synthesize into a final probability
+   - Challenge the forecast with a red team
+
+Always maintain a helpful, educational tone. If a question isn't suitable for forecasting, politely explain why and suggest alternatives.
+""",
+    input_guardrails=[forecastability_guardrail],
+    handoffs=[
+        question_clarifier_agent,
+        reference_class_agent,
+        parameter_design_agent,
+        synthesis_agent,
+        red_team_agent
+    ],
+    model="gpt-4.1-mini",
+)
+
 async def main():
-    draw_graph(parameter_estimator_agent, filename="parameter_estimator_agent.png")
-    print("Welcome to the Parameter Estimator for Forecasting")
+    print("Welcome to the AI Superforecaster")
+    draw_graph(forecast_orchestrator, filename="forecast_orchestrator.png")
     print("What would you like to forecast? Please describe the question or scenario.")
     
     user_question = input("> ")
     
-    with trace("Parameter estimation"):
-        # Use run_streamed instead of run
-        print("\n=== Starting parameter estimation (streaming) ===")
-        result = Runner.run_streamed(
-            parameter_estimator_agent,
-            user_question,
-        )
-        
-        # Process streaming events
-        async for event in result.stream_events():
-            # raw response events
-            if event.type == "raw_response_event":
-                # print("raw response event", event.data)
-                pass
-            # When the agent updates, print that
-            elif event.type == "agent_updated_stream_event":
-                print(f"Agent updated: {event.new_agent.name}")
-            # When items are generated, print them
-            elif event.type == "run_item_stream_event":
-                if event.item.type == "tool_call_item":
-                    print(f"🔍 Searching for: {event.item.raw_item}")
-                elif event.item.type == "tool_call_output_item":
-                    print(f"📊 Found relevant data")
-                elif event.item.type == "message_output_item":
-                    message = ItemHelpers.text_message_output(event.item)
-                    if message:
-                        print(f"💭 Agent thinking: {message[:100]}...")
-        
-        # Get the final output
-        forecast_params = result.final_output_as(ForecastParameters)
-    
-    # Print the final formatted results
-    print("\n=== FORECASTING PARAMETERS ===")
-    print(f"Question: {forecast_params.question}\n")
-    
-    print("Key Parameters:")
-    for i, param in enumerate(forecast_params.parameters, 1):
-        print(f"{i}. {param.name}")
-        print(f"   Estimate: {param.value} [{param.low} - {param.high}]")
-        print(f"   Reasoning: {param.reasoning}\n")
-    
-    print("Additional Considerations:")
-    for i, consideration in enumerate(forecast_params.additional_considerations, 1):
-        print(f"{i}. {consideration}")
+    with trace("Forecasting workflow"):
+        try:
+            # Start with the orchestrator for question validation and clarification
+            print("\n=== Processing your question ===")
+            
+            # First run the clarifier directly
+            clarification_result = await Runner.run(
+                question_clarifier_agent,
+                user_question,
+            )
+            
+            clarification = clarification_result.final_output_as(QuestionClarification)
+            
+            # If clarification needed, ask follow-up questions
+            if clarification.needs_clarification and clarification.follow_up_questions:
+                print("\nTo better understand your question, I need some clarification:")
+                for i, question in enumerate(clarification.follow_up_questions, 1):
+                    print(f"{i}. {question}")
+                print("\nPlease provide this additional information:")
+                additional_info = input("> ")
+                
+                # Run clarifier again with the additional information
+                clarification_result = await Runner.run(
+                    question_clarifier_agent,
+                    f"Original question: {user_question}\nAdditional information: {additional_info}",
+                )
+                clarification = clarification_result.final_output_as(QuestionClarification)
+            
+            # Use the clarified question for parameter estimation
+            final_question = clarification.clarified_question
+            print(f"\nForecasting question: {final_question}")
+            
+            # First, get the reference class and base rate
+            print("\n=== Finding relevant reference class ===")
+            reference_class_result = await Runner.run(
+                reference_class_agent,
+                final_question,
+            )
+            
+            reference_class = reference_class_result.final_output_as(ReferenceClassOutput)
+            print(f"\nReference class: {reference_class.reference_class_description}")
+            print(f"Base rate: {reference_class.base_rate} [{reference_class.low} - {reference_class.high}]")
+            print(f"Sample size: {reference_class.sample_size} historical examples")
+            print(f"Sources: {', '.join(reference_class.bibliography)}")
+            
+            # Next, determine the key parameters
+            print("\n=== Designing key parameters ===")
+            parameter_design_result = await Runner.run(
+                parameter_design_agent,
+                f"Question: {final_question}\nReference class: {reference_class.reference_class_description}\nBase rate: {reference_class.base_rate}",
+            )
+            
+            parameter_design = parameter_design_result.final_output_as(ForecastParameters)
+            
+            # Now research each parameter in parallel
+            print("\n=== Researching parameters (this may take a moment) ===")
+            
+            # Print the parameters that will be researched
+            print("Parameters to research:")
+            for i, param in enumerate(parameter_design.parameters, 1):
+                print(f"{i}. {param.name}: {param.description}")
+                print(f"   Scale: {param.scale_description}")
+            
+            async def research_parameter(param: ParameterMeta) -> ParameterSample:
+                """Run research for a single parameter"""
+                param_prompt = f"""
+                Research the following parameter for the question: {final_question}
+                
+                Parameter: {param.name}
+                Description: {param.description}
+                Scale: {param.scale_description}
+                
+                Based on your research, provide an estimate with 90% confidence interval.
+                """
+                result = await Runner.run(
+                    parameter_researcher_agent,
+                    param_prompt,
+                )
+                
+                # Convert the researcher's output to a ParameterSample
+                sample = result.final_output_as(ParameterSample)
+                sample.name = param.name  # Ensure the name matches
+                return sample
+            
+            # Run parameter research in parallel
+            parameter_samples = await asyncio.gather(
+                *(research_parameter(param) for param in parameter_design.parameters)
+            )
+            
+            # Print interim results from the parameter research
+            print("\n=== Parameter estimates ===")
+            for sample in parameter_samples:
+                print(f"{sample.name}: {sample.value} [{sample.low} - {sample.high}]")
+                print(f"  Sources: {', '.join(sample.sources)}")
+            
+            # Synthesize the final forecast
+            print("\n=== Creating final forecast ===")
+            synthesis_prompt = f"""
+            Create a final forecast for: {final_question}
+            
+            Reference class: {reference_class.reference_class_description}
+            Base rate: {reference_class.base_rate} [{reference_class.low} - {reference_class.high}]
+            
+            Parameter estimates:
+            {json.dumps([sample.model_dump() for sample in parameter_samples], indent=2)}
+            
+            Synthesize these into a final probability estimate.
+            """
+            
+            synthesis_result = await Runner.run(
+                synthesis_agent,
+                synthesis_prompt,
+            )
+            
+            final_forecast = synthesis_result.final_output_as(FinalForecast)
+
+                        # Process and print the final results
+            print("\n=== FINAL FORECAST ===")
+            print(f"Question: {final_question}\n")
+            print(f"Probability: {final_forecast.final_estimate*100:.1f}% [{final_forecast.final_low*100:.1f}% - {final_forecast.final_high*100:.1f}%]")
+            print(f"Starting base rate: {final_forecast.base_rate*100:.1f}%")
+            print(f"Key drivers: {', '.join(final_forecast.key_parameters)}")
+            print(f"Rationale: {final_forecast.rationale}\n")
+            
+            # Optionally run red team analysis
+            print("\n=== Running red team challenge ===")
+            red_team_prompt = f"""
+            Challenge the following forecast:
+            
+            Question: {final_question}
+            Final estimate: {final_forecast.final_estimate} [{final_forecast.final_low} - {final_forecast.final_high}]
+            Base rate: {final_forecast.base_rate}
+            Key parameters: {', '.join(final_forecast.key_parameters)}
+            Rationale: {final_forecast.rationale}
+            
+            Provide a strong alternative view.
+            """
+            
+            red_team_result = await Runner.run(
+                red_team_agent,
+                red_team_prompt,
+            )
+            
+            red_team = red_team_result.final_output_as(RedTeamOutput)
+            
+            print("=== RED TEAM CHALLENGE ===")
+            print(f"Strongest objection: {red_team.strongest_objection}")
+            print(f"Alternative estimate: {red_team.alternate_estimate*100:.1f}% [{red_team.alternate_low*100:.1f}% - {red_team.alternate_high*100:.1f}%]")
+            print(f"Key disagreements: {', '.join(red_team.key_disagreements)}")
+            print(f"Rationale: {red_team.rationale}")
+            
+        except InputGuardrailTripwireTriggered as e:
+            check = e.guardrail_result.output.output_info
+            print("\n=== CANNOT PROCESS THIS QUESTION ===")
+            print(f"Reason: {check.reasoning}")
+            print("\nPlease try asking a question about a future event or trend that can be forecasted.")
+            return
 
 
 if __name__ == "__main__":
