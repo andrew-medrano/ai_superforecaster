@@ -1,0 +1,630 @@
+------- agents_examples/functions.py -------
+import asyncio
+   
+from agents import Agent, Runner, function_tool
+
+
+@function_tool
+def get_weather(city: str) -> str:
+    return f"The weather in {city} is sunny."
+
+
+agent = Agent(
+    name="Hello world",
+    instructions="You are a helpful agent.",
+    tools=[get_weather],
+)
+
+
+async def main():
+    result = await Runner.run(agent, input="What's the weather in Tokyo?")
+    print(result.final_output)
+    # The weather in Tokyo is sunny.
+
+
+if __name__ == "__main__":
+    asyncio.run(main())
+------- agents_examples/advanced/deterministic.py -------
+import asyncio
+
+from pydantic import BaseModel
+
+from agents import Agent, Runner, trace
+
+"""
+This example demonstrates a deterministic flow, where each step is performed by an agent.
+1. The first agent generates a story outline
+2. We feed the outline into the second agent
+3. The second agent checks if the outline is good quality and if it is a scifi story
+4. If the outline is not good quality or not a scifi story, we stop here
+5. If the outline is good quality and a scifi story, we feed the outline into the third agent
+6. The third agent writes the story
+"""
+
+story_outline_agent = Agent(
+    name="story_outline_agent",
+    instructions="Generate a very short story outline based on the user's input.",
+)
+
+
+class OutlineCheckerOutput(BaseModel):
+    good_quality: bool
+    is_scifi: bool
+
+
+outline_checker_agent = Agent(
+    name="outline_checker_agent",
+    instructions="Read the given story outline, and judge the quality. Also, determine if it is a scifi story.",
+    output_type=OutlineCheckerOutput,
+)
+
+story_agent = Agent(
+    name="story_agent",
+    instructions="Write a short story based on the given outline.",
+    output_type=str,
+)
+
+
+async def main():
+    input_prompt = input("What kind of story do you want? ")
+
+    # Ensure the entire workflow is a single trace
+    with trace("Deterministic story flow"):
+        # 1. Generate an outline
+        outline_result = await Runner.run(
+            story_outline_agent,
+            input_prompt,
+        )
+        print("Outline generated")
+
+        # 2. Check the outline
+        outline_checker_result = await Runner.run(
+            outline_checker_agent,
+            outline_result.final_output,
+        )
+
+        # 3. Add a gate to stop if the outline is not good quality or not a scifi story
+        assert isinstance(outline_checker_result.final_output, OutlineCheckerOutput)
+        if not outline_checker_result.final_output.good_quality:
+            print("Outline is not good quality, so we stop here.")
+            exit(0)
+
+        if not outline_checker_result.final_output.is_scifi:
+            print("Outline is not a scifi story, so we stop here.")
+            exit(0)
+
+        print("Outline is good quality and a scifi story, so we continue to write the story.")
+
+        # 4. Write the story
+        story_result = await Runner.run(
+            story_agent,
+            outline_result.final_output,
+        )
+        print(f"Story: {story_result.final_output}")
+
+
+if __name__ == "__main__":
+    asyncio.run(main())
+
+------- agents_examples/advanced/input_guardrails.py -------
+from __future__ import annotations
+
+import asyncio
+
+from pydantic import BaseModel
+
+from agents import (
+    Agent,
+    GuardrailFunctionOutput,
+    InputGuardrailTripwireTriggered,
+    RunContextWrapper,
+    Runner,
+    TResponseInputItem,
+    input_guardrail,
+)
+
+"""
+This example shows how to use guardrails.
+
+Guardrails are checks that run in parallel to the agent's execution.
+They can be used to do things like:
+- Check if input messages are off-topic
+- Check that output messages don't violate any policies
+- Take over control of the agent's execution if an unexpected input is detected
+
+In this example, we'll setup an input guardrail that trips if the user is asking to do math homework.
+If the guardrail trips, we'll respond with a refusal message.
+"""
+
+
+### 1. An agent-based guardrail that is triggered if the user is asking to do math homework
+class MathHomeworkOutput(BaseModel):
+    reasoning: str
+    is_math_homework: bool
+
+
+guardrail_agent = Agent(
+    name="Guardrail check",
+    instructions="Check if the user is asking you to do their math homework.",
+    output_type=MathHomeworkOutput,
+)
+
+
+@input_guardrail
+async def math_guardrail(
+    context: RunContextWrapper[None], agent: Agent, input: str | list[TResponseInputItem]
+) -> GuardrailFunctionOutput:
+    """This is an input guardrail function, which happens to call an agent to check if the input
+    is a math homework question.
+    """
+    result = await Runner.run(guardrail_agent, input, context=context.context)
+    final_output = result.final_output_as(MathHomeworkOutput)
+
+    return GuardrailFunctionOutput(
+        output_info=final_output,
+        tripwire_triggered=final_output.is_math_homework,
+    )
+
+
+### 2. The run loop
+
+
+async def main():
+    agent = Agent(
+        name="Customer support agent",
+        instructions="You are a customer support agent. You help customers with their questions.",
+        input_guardrails=[math_guardrail],
+    )
+
+    input_data: list[TResponseInputItem] = []
+
+    while True:
+        user_input = input("Enter a message: ")
+        input_data.append(
+            {
+                "role": "user",
+                "content": user_input,
+            }
+        )
+
+        try:
+            result = await Runner.run(agent, input_data)
+            print(result.final_output)
+            # If the guardrail didn't trigger, we use the result as the input for the next run
+            input_data = result.to_input_list()
+        except InputGuardrailTripwireTriggered:
+            # If the guardrail triggered, we instead add a refusal message to the input
+            message = "Sorry, I can't help you with your math homework."
+            print(message)
+            input_data.append(
+                {
+                    "role": "assistant",
+                    "content": message,
+                }
+            )
+
+    # Sample run:
+    # Enter a message: What's the capital of California?
+    # The capital of California is Sacramento.
+    # Enter a message: Can you help me solve for x: 2x + 5 = 11
+    # Sorry, I can't help you with your math homework.
+
+
+if __name__ == "__main__":
+    asyncio.run(main())
+
+------- agents_examples/advanced/agents_as_tools.py -------
+import asyncio
+
+from agents import Agent, ItemHelpers, MessageOutputItem, Runner, trace
+
+"""
+This example shows the agents-as-tools pattern. The frontline agent receives a user message and
+then picks which agents to call, as tools. In this case, it picks from a set of translation
+agents.
+"""
+
+spanish_agent = Agent(
+    name="spanish_agent",
+    instructions="You translate the user's message to Spanish",
+    handoff_description="An english to spanish translator",
+)
+
+french_agent = Agent(
+    name="french_agent",
+    instructions="You translate the user's message to French",
+    handoff_description="An english to french translator",
+)
+
+italian_agent = Agent(
+    name="italian_agent",
+    instructions="You translate the user's message to Italian",
+    handoff_description="An english to italian translator",
+)
+
+orchestrator_agent = Agent(
+    name="orchestrator_agent",
+    instructions=(
+        "You are a translation agent. You use the tools given to you to translate."
+        "If asked for multiple translations, you call the relevant tools in order."
+        "You never translate on your own, you always use the provided tools."
+    ),
+    tools=[
+        spanish_agent.as_tool(
+            tool_name="translate_to_spanish",
+            tool_description="Translate the user's message to Spanish",
+        ),
+        french_agent.as_tool(
+            tool_name="translate_to_french",
+            tool_description="Translate the user's message to French",
+        ),
+        italian_agent.as_tool(
+            tool_name="translate_to_italian",
+            tool_description="Translate the user's message to Italian",
+        ),
+    ],
+)
+
+synthesizer_agent = Agent(
+    name="synthesizer_agent",
+    instructions="You inspect translations, correct them if needed, and produce a final concatenated response.",
+)
+
+
+async def main():
+    msg = input("Hi! What would you like translated, and to which languages? ")
+
+    # Run the entire orchestration in a single trace
+    with trace("Orchestrator evaluator"):
+        orchestrator_result = await Runner.run(orchestrator_agent, msg)
+
+        for item in orchestrator_result.new_items:
+            if isinstance(item, MessageOutputItem):
+                text = ItemHelpers.text_message_output(item)
+                if text:
+                    print(f"  - Translation step: {text}")
+
+        synthesizer_result = await Runner.run(
+            synthesizer_agent, orchestrator_result.to_input_list()
+        )
+
+    print(f"\n\nFinal response:\n{synthesizer_result.final_output}")
+
+
+if __name__ == "__main__":
+    asyncio.run(main())
+------- agents_examples/advanced/output_guardrails.py -------
+from __future__ import annotations
+
+import asyncio
+import json
+
+from pydantic import BaseModel, Field
+
+from agents import (
+    Agent,
+    GuardrailFunctionOutput,
+    OutputGuardrailTripwireTriggered,
+    RunContextWrapper,
+    Runner,
+    output_guardrail,
+)
+
+"""
+This example shows how to use output guardrails.
+
+Output guardrails are checks that run on the final output of an agent.
+They can be used to do things like:
+- Check if the output contains sensitive data
+- Check if the output is a valid response to the user's message
+
+In this example, we'll use a (contrived) example where we check if the agent's response contains
+a phone number.
+"""
+
+
+# The agent's output type
+class MessageOutput(BaseModel):
+    reasoning: str = Field(description="Thoughts on how to respond to the user's message")
+    response: str = Field(description="The response to the user's message")
+    user_name: str | None = Field(description="The name of the user who sent the message, if known")
+
+
+@output_guardrail
+async def sensitive_data_check(
+    context: RunContextWrapper, agent: Agent, output: MessageOutput
+) -> GuardrailFunctionOutput:
+    phone_number_in_response = "650" in output.response
+    phone_number_in_reasoning = "650" in output.reasoning
+
+    return GuardrailFunctionOutput(
+        output_info={
+            "phone_number_in_response": phone_number_in_response,
+            "phone_number_in_reasoning": phone_number_in_reasoning,
+        },
+        tripwire_triggered=phone_number_in_response or phone_number_in_reasoning,
+    )
+
+
+agent = Agent(
+    name="Assistant",
+    instructions="You are a helpful assistant.",
+    output_type=MessageOutput,
+    output_guardrails=[sensitive_data_check],
+)
+
+
+async def main():
+    # This should be ok
+    await Runner.run(agent, "What's the capital of California?")
+    print("First message passed")
+
+    # This should trip the guardrail
+    try:
+        result = await Runner.run(
+            agent, "My phone number is 650-123-4567. Where do you think I live?"
+        )
+        print(
+            f"Guardrail didn't trip - this is unexpected. Output: {json.dumps(result.final_output.model_dump(), indent=2)}"
+        )
+
+    except OutputGuardrailTripwireTriggered as e:
+        print(f"Guardrail tripped. Info: {e.guardrail_result.output.output_info}")
+
+
+if __name__ == "__main__":
+    asyncio.run(main())
+
+------- agents_examples/advanced/parallelization.py -------
+import asyncio
+
+from agents import Agent, ItemHelpers, Runner, trace
+
+"""
+This example shows the parallelization pattern. We run the agent three times in parallel, and pick
+the best result.
+"""
+
+spanish_agent = Agent(
+    name="spanish_agent",
+    instructions="You translate the user's message to Spanish",
+)
+
+translation_picker = Agent(
+    name="translation_picker",
+    instructions="You pick the best Spanish translation from the given options.",
+)
+
+
+async def main():
+    msg = input("Hi! Enter a message, and we'll translate it to Spanish.\n\n")
+
+    # Ensure the entire workflow is a single trace
+    with trace("Parallel translation"):
+        res_1, res_2, res_3 = await asyncio.gather(
+            Runner.run(
+                spanish_agent,
+                msg,
+            ),
+            Runner.run(
+                spanish_agent,
+                msg,
+            ),
+            Runner.run(
+                spanish_agent,
+                msg,
+            ),
+        )
+
+        outputs = [
+            ItemHelpers.text_message_outputs(res_1.new_items),
+            ItemHelpers.text_message_outputs(res_2.new_items),
+            ItemHelpers.text_message_outputs(res_3.new_items),
+        ]
+
+        translations = "\n\n".join(outputs)
+        print(f"\n\nTranslations:\n\n{translations}")
+
+        best_translation = await Runner.run(
+            translation_picker,
+            f"Input: {msg}\n\nTranslations:\n{translations}",
+        )
+
+    print("\n\n-----")
+
+    print(f"Best translation: {best_translation.final_output}")
+
+
+if __name__ == "__main__":
+    asyncio.run(main())
+
+------- agents_examples/advanced/routing.py -------
+import asyncio
+import uuid
+
+from openai.types.responses import ResponseContentPartDoneEvent, ResponseTextDeltaEvent
+
+from agents import Agent, RawResponsesStreamEvent, Runner, TResponseInputItem, trace
+
+"""
+This example shows the handoffs/routing pattern. The triage agent receives the first message, and
+then hands off to the appropriate agent based on the language of the request. Responses are
+streamed to the user.
+"""
+
+french_agent = Agent(
+    name="french_agent",
+    instructions="You only speak French",
+)
+
+spanish_agent = Agent(
+    name="spanish_agent",
+    instructions="You only speak Spanish",
+)
+
+english_agent = Agent(
+    name="english_agent",
+    instructions="You only speak English",
+)
+
+triage_agent = Agent(
+    name="triage_agent",
+    instructions="Handoff to the appropriate agent based on the language of the request.",
+    handoffs=[french_agent, spanish_agent, english_agent],
+)
+
+
+async def main():
+    # We'll create an ID for this conversation, so we can link each trace
+    conversation_id = str(uuid.uuid4().hex[:16])
+
+    msg = input("Hi! We speak French, Spanish and English. How can I help? ")
+    agent = triage_agent
+    inputs: list[TResponseInputItem] = [{"content": msg, "role": "user"}]
+
+    while True:
+        # Each conversation turn is a single trace. Normally, each input from the user would be an
+        # API request to your app, and you can wrap the request in a trace()
+        with trace("Routing example", group_id=conversation_id):
+            result = Runner.run_streamed(
+                agent,
+                input=inputs,
+            )
+            async for event in result.stream_events():
+                if not isinstance(event, RawResponsesStreamEvent):
+                    continue
+                data = event.data
+                if isinstance(data, ResponseTextDeltaEvent):
+                    print(data.delta, end="", flush=True)
+                elif isinstance(data, ResponseContentPartDoneEvent):
+                    print("\n")
+
+        inputs = result.to_input_list()
+        print("\n")
+
+        user_msg = input("Enter a message: ")
+        inputs.append({"content": user_msg, "role": "user"})
+        agent = result.current_agent
+
+
+if __name__ == "__main__":
+    asyncio.run(main())
+
+------- agents_examples/advanced/llm_as_a_judge.py -------
+from __future__ import annotations
+
+import asyncio
+from dataclasses import dataclass
+from typing import Literal
+
+from agents import Agent, ItemHelpers, Runner, TResponseInputItem, trace
+
+"""
+This example shows the LLM as a judge pattern. The first agent generates an outline for a story.
+The second agent judges the outline and provides feedback. We loop until the judge is satisfied
+with the outline.
+"""
+
+story_outline_generator = Agent(
+    name="story_outline_generator",
+    instructions=(
+        "You generate a very short story outline based on the user's input."
+        "If there is any feedback provided, use it to improve the outline."
+    ),
+)
+
+
+@dataclass
+class EvaluationFeedback:
+    feedback: str
+    score: Literal["pass", "needs_improvement", "fail"]
+
+
+evaluator = Agent[None](
+    name="evaluator",
+    instructions=(
+        "You evaluate a story outline and decide if it's good enough."
+        "If it's not good enough, you provide feedback on what needs to be improved."
+        "Never give it a pass on the first try."
+    ),
+    output_type=EvaluationFeedback,
+)
+
+
+async def main() -> None:
+    msg = input("What kind of story would you like to hear? ")
+    input_items: list[TResponseInputItem] = [{"content": msg, "role": "user"}]
+
+    latest_outline: str | None = None
+
+    # We'll run the entire workflow in a single trace
+    with trace("LLM as a judge"):
+        while True:
+            story_outline_result = await Runner.run(
+                story_outline_generator,
+                input_items,
+            )
+
+            input_items = story_outline_result.to_input_list()
+            latest_outline = ItemHelpers.text_message_outputs(story_outline_result.new_items)
+            print("Story outline generated")
+
+            evaluator_result = await Runner.run(evaluator, input_items)
+            result: EvaluationFeedback = evaluator_result.final_output
+
+            print(f"Evaluator score: {result.score}")
+
+            if result.score == "pass":
+                print("Story outline is good enough, exiting.")
+                break
+
+            print("Re-running with feedback")
+
+            input_items.append({"content": f"Feedback: {result.feedback}", "role": "user"})
+
+    print(f"Final story outline: {latest_outline}")
+
+
+if __name__ == "__main__":
+    asyncio.run(main())
+
+------- agents_examples/hello_world.py -------
+from agents import Agent, Runner
+
+agent = Agent(name="Assistant", instructions="You are a helpful assistant")
+
+result = Runner.run_sync(agent, "Write a haiku about recursion in programming.")
+print(result.final_output)
+
+# Code within the code,
+# Functions calling themselves,
+# Infinite loop's dance.
+------- agents_examples/handoffs.py -------
+from agents import Agent, Runner
+import asyncio
+
+spanish_agent = Agent(
+    name="Spanish agent",
+    instructions="You only speak Spanish.",
+)
+
+english_agent = Agent(
+    name="English agent",
+    instructions="You only speak English",
+)
+
+triage_agent = Agent(
+    name="Triage agent",
+    instructions="Handoff to the appropriate agent based on the language of the request.",
+    handoffs=[spanish_agent, english_agent],
+)
+
+
+async def main():
+    result = await Runner.run(triage_agent, input="Hola, ¿cómo estás?")
+    print(result.final_output)
+    # ¡Hola! Estoy bien, gracias por preguntar. ¿Y tú, cómo estás?
+
+
+if __name__ == "__main__":
+    asyncio.run(main())
