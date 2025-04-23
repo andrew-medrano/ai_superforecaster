@@ -33,8 +33,8 @@ class ParameterSample(BaseModel):
     reasoning: str = Field(description="Reasoning for this estimate")
     sources: List[str] = Field(description="Sources supporting this estimate", default_factory=list)
 
-class ReferenceClassOutput(BaseModel):
-    """Output format for reference class forecasting"""
+class ReferenceClass(BaseModel):
+    """Output format for a single reference class"""
     base_rate: float = Field(description="Historical base rate/frequency of similar events")
     low: float = Field(description="Lower bound of 90% confidence interval for base rate")
     high: float = Field(description="Upper bound of 90% confidence interval for base rate")
@@ -43,6 +43,11 @@ class ReferenceClassOutput(BaseModel):
     bibliography: List[str] = Field(description="Citations for historical data sources")
     reasoning: str = Field(description="Reasoning for selecting this reference class")
 
+class ReferenceClassOutput(BaseModel):
+    """Output format for reference class forecasting with multiple classes"""
+    reference_classes: List[ReferenceClass] = Field(description="List of reference classes with their base rates")
+    recommended_class_index: int = Field(description="Index of the recommended reference class to use (0-based)")
+    selection_reasoning: str = Field(description="Reasoning for recommending the primary reference class")
 
 class ForecastParameters(BaseModel):
     """Output format for forecast parameters"""
@@ -122,17 +127,23 @@ Be objective and factual. Prioritize information that would be most relevant for
 
 reference_class_agent = Agent(
     name="Reference Class Finder",
-    instructions="""You identify the appropriate reference class for a forecasting question and determine the historical base rate.
+    instructions="""You identify appropriate reference classes for a forecasting question and determine the historical base rates.
 
 For any forecasting question:
-1. First identify what reference class is most appropriate - the set of similar historical events or situations
-2. Search for historical data on this reference class using the web search tool
-3. Determine the base rate (frequency of occurrence) within this reference class
-4. Provide a 90% confidence interval around this base rate
-5. Document your sources with at least 3 web searches
-6. Explain your reasoning for selecting this reference class
+1. Generate THREE different reference classes that could be applied to this question
+2. For each reference class:
+   - Identify what makes this reference class appropriate
+   - Search for historical data on this reference class using the web search tool
+   - Determine the base rate (frequency of occurrence) within this reference class
+   - Provide a 90% confidence interval around this base rate
+   - Document your sources with at least 1-2 web searches per reference class
+   - Explain your reasoning for selecting this reference class
+3. Recommend which of the three reference classes should be the primary one to use
+4. Provide reasoning for your recommendation
 
-Focus on finding the most relevant historical analogues. Be precise about:
+Make sure the reference classes are genuinely different from each other to provide diverse perspectives on the question.
+
+Focus on finding relevant historical analogues. Be precise about:
 - Sample size (how many cases in your reference class)
 - Time period covered
 - Any adjustments needed for this specific case
@@ -140,9 +151,10 @@ Focus on finding the most relevant historical analogues. Be precise about:
 
 Example:
 "What is the probability that China will invade Taiwan by 2030?"
-- Reference class: Military invasions of claimed territories by nuclear powers (1950-present)
-- Base rate: 9 invasions out of 37 similar territorial claims (24%)
-- Search for data on historical territorial disputes, nuclear power military actions, etc.
+Reference Classes:
+1. Military invasions of claimed territories by nuclear powers (1950-present)
+2. Historical Chinese military actions to enforce territorial claims
+3. Militarized disputes between countries with strong economic ties
 
 Aim for objective, quantifiable reference classes whenever possible.""",
     tools=[WebSearchTool()],
@@ -386,10 +398,6 @@ async def main():
             
             # Start the background info collection in parallel with reference class search
             print("\n=== Finding relevant reference class and gathering background info ===")
-            reference_class_task = asyncio.create_task(Runner.run(
-                reference_class_agent,
-                final_question,
-            ))
             
             # Get current date for background info agent
             current_date = datetime.datetime.now().strftime("%Y-%m-%d")
@@ -398,19 +406,82 @@ async def main():
                 f"Provide background information as of {current_date} relevant to the question: {final_question}",
             ))
             
-            # Wait for reference class results first
-            reference_class_result = await reference_class_task
-            reference_class = reference_class_result.final_output_as(ReferenceClassOutput)
-            print(f"\nReference class: {reference_class.reference_class_description}")
-            print(f"Base rate: {reference_class.base_rate} [{reference_class.low} - {reference_class.high}]")
-            print(f"Sample size: {reference_class.sample_size} historical examples")
-            print(f"Sources: {', '.join(reference_class.bibliography)}")
+            # Wait for background info first since it provides context for reference class selection
+            background_info_result = await background_info_task
+            background_info = background_info_result.final_output_as(BackgroundInfoOutput)
             
-            # Next, determine the key parameters and continue with the background info collection
+            # Print background info
+            print("\n=== Current World Context ===")
+            print(f"Current date: {background_info.current_date}")
+            print(f"Summary: {background_info.summary}")
+            print("\nRecent Major Events:")
+            for event in background_info.major_recent_events[:3]:  # Show top 3 events
+                print(f"- {event}")
+            print("\nKey Ongoing Trends:")
+            for trend in background_info.key_trends[:3]:  # Show top 3 trends
+                print(f"- {trend}")
+            
+            # Now search for reference classes with background context
+            reference_class_prompt = f"""
+            Find appropriate reference classes for the following question:
+            {final_question}
+            
+            Current world context:
+            {background_info.summary}
+            
+            Recent major events:
+            {', '.join(background_info.major_recent_events[:3])}
+            
+            Key ongoing trends:
+            {', '.join(background_info.key_trends[:3])}
+            """
+            
+            reference_class_task = asyncio.create_task(Runner.run(
+                reference_class_agent,
+                reference_class_prompt,
+            ))
+            
+            # Wait for reference class results
+            reference_class_result = await reference_class_task
+            reference_class_output = reference_class_result.final_output_as(ReferenceClassOutput)
+            
+            # Display all three reference classes
+            print("\n=== REFERENCE CLASSES ===")
+            for i, ref_class in enumerate(reference_class_output.reference_classes):
+                is_recommended = i == reference_class_output.recommended_class_index
+                print(f"\nReference Class {i+1}{' (RECOMMENDED)' if is_recommended else ''}:")
+                print(f"Description: {ref_class.reference_class_description}")
+                print(f"Base rate: {ref_class.base_rate} [{ref_class.low} - {ref_class.high}]")
+                print(f"Sample size: {ref_class.sample_size} historical examples")
+                print(f"Sources: {', '.join(ref_class.bibliography)}")
+                print(f"Reasoning: {ref_class.reasoning}")
+            
+            print(f"\nRecommendation reasoning: {reference_class_output.selection_reasoning}")
+            
+            # Get the recommended reference class for further processing
+            recommended_ref_class = reference_class_output.reference_classes[reference_class_output.recommended_class_index]
+            
+            # Next, determine the key parameters and include background info
             print("\n=== Designing key parameters ===")
+            parameter_design_prompt = f"""
+            Design parameters for the forecasting question: {final_question}
+            
+            Current world context:
+            {background_info.summary}
+            
+            Recent major events:
+            {', '.join(background_info.major_recent_events[:3])}
+            
+            Key ongoing trends:
+            {', '.join(background_info.key_trends[:3])}
+            
+            Reference class: {recommended_ref_class.reference_class_description}
+            Base rate: {recommended_ref_class.base_rate} [{recommended_ref_class.low} - {recommended_ref_class.high}]
+            """
+            
             parameter_design_task = asyncio.create_task(Runner.run(
                 parameter_design_agent,
-                f"Question: {final_question}\nReference class: {reference_class.reference_class_description}\nBase rate: {reference_class.base_rate}",
+                parameter_design_prompt,
             ))
             
             # Process parameters while background info continues to gather
@@ -426,14 +497,37 @@ async def main():
                 print(f"{i}. {param.name}: {param.description}")
                 print(f"   Scale: {param.scale_description}")
             
+            # Create a summary of all parameters to provide context
+            all_parameters_context = ""
+            for i, param in enumerate(parameter_design.parameters, 1):
+                all_parameters_context += f"{i}. {param.name}: {param.description}\n"
+                all_parameters_context += f"   Scale: {param.scale_description}\n"
+                if param.interacts_with:
+                    all_parameters_context += f"   Interacts with: {', '.join(param.interacts_with)}\n"
+                if param.interaction_description:
+                    all_parameters_context += f"   Interaction: {param.interaction_description}\n"
+                all_parameters_context += "\n"
+            
             async def research_parameter(param: ParameterMeta) -> ParameterSample:
                 """Run research for a single parameter"""
                 param_prompt = f"""
                 Research the following parameter for the question: {final_question}
                 
+                Current world context:
+                {background_info.summary}
+                
+                Recent major events:
+                {', '.join(background_info.major_recent_events[:3])}
+                
+                Key ongoing trends:
+                {', '.join(background_info.key_trends[:3])}
+                
                 Parameter: {param.name}
                 Description: {param.description}
                 Scale: {param.scale_description}
+                
+                Other parameters being researched:
+                {all_parameters_context}
                 
                 Based on your research, provide an estimate with 90% confidence interval.
                 """
@@ -452,25 +546,6 @@ async def main():
                 *(research_parameter(param) for param in parameter_design.parameters)
             )
             
-            # Check if background info is complete
-            if not background_info_task.done():
-                print("\n=== Waiting for background information to complete ===")
-            
-            # Wait for background info to complete
-            background_info_result = await background_info_task
-            background_info = background_info_result.final_output_as(BackgroundInfoOutput)
-            
-            # Print background info
-            print("\n=== Current World Context ===")
-            print(f"Current date: {background_info.current_date}")
-            print(f"Summary: {background_info.summary}")
-            print("\nRecent Major Events:")
-            for event in background_info.major_recent_events[:3]:  # Show top 3 events
-                print(f"- {event}")
-            print("\nKey Ongoing Trends:")
-            for trend in background_info.key_trends[:3]:  # Show top 3 trends
-                print(f"- {trend}")
-            
             # Print interim results from the parameter research
             print("\n=== Parameter estimates ===")
             for sample in parameter_samples:
@@ -479,19 +554,34 @@ async def main():
             
             # Synthesize the final forecast
             print("\n=== Creating final forecast ===")
+            
+            # Create the reference classes information for the synthesis prompt
+            reference_classes_info = ""
+            for i, ref_class in enumerate(reference_class_output.reference_classes):
+                is_recommended = i == reference_class_output.recommended_class_index
+                reference_classes_info += f"Reference Class {i+1}{' (RECOMMENDED)' if is_recommended else ''}:\n"
+                reference_classes_info += f"- Description: {ref_class.reference_class_description}\n"
+                reference_classes_info += f"- Base rate: {ref_class.base_rate} [{ref_class.low} - {ref_class.high}]\n"
+                reference_classes_info += f"- Sample size: {ref_class.sample_size}\n\n"
+            
             synthesis_prompt = f"""
             Create a final forecast for: {final_question}
             
             Current context as of {background_info.current_date}:
             {background_info.summary}
             
-            Reference class: {reference_class.reference_class_description}
-            Base rate: {reference_class.base_rate} [{reference_class.low} - {reference_class.high}]
+            Multiple reference classes were identified:
+            {reference_classes_info}
+            Recommendation reasoning: {reference_class_output.selection_reasoning}
+            
+            Primary reference class used: {recommended_ref_class.reference_class_description}
+            Base rate from primary reference class: {recommended_ref_class.base_rate} [{recommended_ref_class.low} - {recommended_ref_class.high}]
             
             Parameter estimates:
             {json.dumps([sample.model_dump() for sample in parameter_samples], indent=2)}
             
-            Synthesize these into a final probability estimate.
+            Synthesize these into a final probability estimate. You may consider insights from all reference classes,
+            but primarily use the recommended one as your starting point.
             """
             
             synthesis_result = await Runner.run(
@@ -511,16 +601,45 @@ async def main():
             
             # Optionally run red team analysis
             print("\n=== Running red team challenge ===")
+            
+            # Create a full context for the red team including all reference classes
+            reference_classes_info = ""
+            for i, ref_class in enumerate(reference_class_output.reference_classes):
+                is_recommended = i == reference_class_output.recommended_class_index
+                reference_classes_info += f"Reference Class {i+1}{' (RECOMMENDED)' if is_recommended else ''}:\n"
+                reference_classes_info += f"- Description: {ref_class.reference_class_description}\n"
+                reference_classes_info += f"- Base rate: {ref_class.base_rate} [{ref_class.low} - {ref_class.high}]\n"
+                reference_classes_info += f"- Sample size: {ref_class.sample_size}\n"
+                reference_classes_info += f"- Reasoning: {ref_class.reasoning}\n\n"
+            
+            # Create parameter info for red team
+            parameters_info = ""
+            for sample in parameter_samples:
+                parameters_info += f"{sample.name}: {sample.value} [{sample.low} - {sample.high}]\n"
+                parameters_info += f"- Reasoning: {sample.reasoning}\n\n"
+            
             red_team_prompt = f"""
             Challenge the following forecast:
             
             Question: {final_question}
-            Final estimate: {final_forecast.final_estimate} [{final_forecast.final_low} - {final_forecast.final_high}]
-            Base rate: {final_forecast.base_rate}
-            Key parameters: {', '.join(final_forecast.key_parameters)}
-            Rationale: {final_forecast.rationale}
             
-            Provide a strong alternative view.
+            Current world context:
+            {background_info.summary}
+            
+            Reference classes considered:
+            {reference_classes_info}
+            
+            Parameter estimates used:
+            {parameters_info}
+            
+            Final forecast:
+            - Estimate: {final_forecast.final_estimate} [{final_forecast.final_low} - {final_forecast.final_high}]
+            - Base rate used: {final_forecast.base_rate}
+            - Key parameters: {', '.join(final_forecast.key_parameters)}
+            - Rationale: {final_forecast.rationale}
+            
+            Provide a strong alternative view. Consider whether different reference classes should have been used,
+            if parameters were incorrectly estimated, or if important factors were overlooked.
             """
             
             red_team_result = await Runner.run(
