@@ -2,6 +2,7 @@ import asyncio
 import json
 from pydantic import BaseModel, Field
 from typing import List, Dict, Any, Optional, Literal
+import datetime
 
 from agents import Agent, Runner, trace, ItemHelpers, input_guardrail, GuardrailFunctionOutput, RunContextWrapper, InputGuardrailTripwireTriggered
 from agents.tool import WebSearchTool
@@ -86,6 +87,39 @@ class RedTeamOutput(BaseModel):
     rationale: str = Field(description="Rationale for the alternative view")
 
 
+class BackgroundInfoOutput(BaseModel):
+    """Output with current context about the world to account for model knowledge cutoff"""
+    current_date: str = Field(description="Current date in YYYY-MM-DD format")
+    major_recent_events: List[str] = Field(description="List of significant recent events with descriptions")
+    key_trends: List[str] = Field(description="Key ongoing trends relevant to forecasting")
+    notable_changes: List[str] = Field(description="Notable changes since the model's knowledge cutoff")
+    summary: str = Field(description="Brief summary of the current global context")
+
+
+background_info_agent = Agent(
+    name="Background Information Provider",
+    instructions="""You provide up-to-date context about the current state of the world to help with forecasting.
+
+Your task is to:
+1. Search for recent major events and developments that may impact forecasts
+2. Identify key global trends that are ongoing
+3. Note any significant changes since the model's knowledge cutoff
+4. Provide a brief summary of the current global context
+
+Focus on:
+- Major geopolitical developments
+- Significant economic indicators and trends
+- Technological breakthroughs or advancements
+- Social and political shifts
+- Environmental changes or events
+
+Be objective and factual. Prioritize information that would be most relevant for forecasting.""",
+    tools=[WebSearchTool()],
+    output_type=BackgroundInfoOutput,
+    model="gpt-4.1-mini",
+)
+
+
 reference_class_agent = Agent(
     name="Reference Class Finder",
     instructions="""You identify the appropriate reference class for a forecasting question and determine the historical base rate.
@@ -113,7 +147,7 @@ Example:
 Aim for objective, quantifiable reference classes whenever possible.""",
     tools=[WebSearchTool()],
     output_type=ReferenceClassOutput,
-    model="gpt-4.1",
+    model="gpt-4.1-mini",
 )
 
 
@@ -171,7 +205,7 @@ Focus on finding objective data wherever possible. If data is limited, use analo
 Keep your reasoning concise and data-driven.""",
     tools=[WebSearchTool()],
     output_type=ParameterSample,
-    model="gpt-4.1",
+    model="gpt-4.1-mini",
 )
 
 
@@ -278,6 +312,7 @@ Focus on:
 
 Your goal is NOT to be contrarian for its own sake, but to provide a genuinely strong alternative view that could improve the forecast.""",
     output_type=RedTeamOutput,
+    tools=[WebSearchTool()],
     model="gpt-4.1",
 )
 
@@ -289,6 +324,7 @@ forecast_orchestrator = Agent(
 1. Ensure the user's question is appropriate for forecasting
 2. Clarify vague questions into specific, time-bound forecasting questions
 3. Orchestrate the forecasting pipeline:
+   - Gather current world context and background information
    - Find an appropriate reference class and historical base rate
    - Design key parameters that would adjust this base rate
    - Research each parameter with evidence 
@@ -300,6 +336,7 @@ Always maintain a helpful, educational tone. If a question isn't suitable for fo
     input_guardrails=[forecastability_guardrail],
     handoffs=[
         question_clarifier_agent,
+        background_info_agent,
         reference_class_agent,
         parameter_design_agent,
         synthesis_agent,
@@ -347,26 +384,37 @@ async def main():
             final_question = clarification.clarified_question
             print(f"\nForecasting question: {final_question}")
             
-            # First, get the reference class and base rate
-            print("\n=== Finding relevant reference class ===")
-            reference_class_result = await Runner.run(
+            # Start the background info collection in parallel with reference class search
+            print("\n=== Finding relevant reference class and gathering background info ===")
+            reference_class_task = asyncio.create_task(Runner.run(
                 reference_class_agent,
                 final_question,
-            )
+            ))
             
+            # Get current date for background info agent
+            current_date = datetime.datetime.now().strftime("%Y-%m-%d")
+            background_info_task = asyncio.create_task(Runner.run(
+                background_info_agent,
+                f"Provide background information as of {current_date} relevant to the question: {final_question}",
+            ))
+            
+            # Wait for reference class results first
+            reference_class_result = await reference_class_task
             reference_class = reference_class_result.final_output_as(ReferenceClassOutput)
             print(f"\nReference class: {reference_class.reference_class_description}")
             print(f"Base rate: {reference_class.base_rate} [{reference_class.low} - {reference_class.high}]")
             print(f"Sample size: {reference_class.sample_size} historical examples")
             print(f"Sources: {', '.join(reference_class.bibliography)}")
             
-            # Next, determine the key parameters
+            # Next, determine the key parameters and continue with the background info collection
             print("\n=== Designing key parameters ===")
-            parameter_design_result = await Runner.run(
+            parameter_design_task = asyncio.create_task(Runner.run(
                 parameter_design_agent,
                 f"Question: {final_question}\nReference class: {reference_class.reference_class_description}\nBase rate: {reference_class.base_rate}",
-            )
+            ))
             
+            # Process parameters while background info continues to gather
+            parameter_design_result = await parameter_design_task
             parameter_design = parameter_design_result.final_output_as(ForecastParameters)
             
             # Now research each parameter in parallel
@@ -404,6 +452,25 @@ async def main():
                 *(research_parameter(param) for param in parameter_design.parameters)
             )
             
+            # Check if background info is complete
+            if not background_info_task.done():
+                print("\n=== Waiting for background information to complete ===")
+            
+            # Wait for background info to complete
+            background_info_result = await background_info_task
+            background_info = background_info_result.final_output_as(BackgroundInfoOutput)
+            
+            # Print background info
+            print("\n=== Current World Context ===")
+            print(f"Current date: {background_info.current_date}")
+            print(f"Summary: {background_info.summary}")
+            print("\nRecent Major Events:")
+            for event in background_info.major_recent_events[:3]:  # Show top 3 events
+                print(f"- {event}")
+            print("\nKey Ongoing Trends:")
+            for trend in background_info.key_trends[:3]:  # Show top 3 trends
+                print(f"- {trend}")
+            
             # Print interim results from the parameter research
             print("\n=== Parameter estimates ===")
             for sample in parameter_samples:
@@ -414,6 +481,9 @@ async def main():
             print("\n=== Creating final forecast ===")
             synthesis_prompt = f"""
             Create a final forecast for: {final_question}
+            
+            Current context as of {background_info.current_date}:
+            {background_info.summary}
             
             Reference class: {reference_class.reference_class_description}
             Base rate: {reference_class.base_rate} [{reference_class.low} - {reference_class.high}]

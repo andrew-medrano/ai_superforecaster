@@ -1,7 +1,8 @@
 Notes:
 
 - using gpt-4.1-mini by default. 
-- test question: what is the probability that there is a full scale invasion of taiwan by china for each year up to 2030?
+
+what is the probability that there is a full scale invasion of taiwan by china for each year up to 2030?
 
 TODO: 
 - new agent to set initial background information, what is the current state of the world? 
