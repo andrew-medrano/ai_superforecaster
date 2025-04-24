@@ -1,0 +1,20 @@
+[20:03:10] === LOG-ODDS CALCULATION ===
+[20:03:10] Base rate: 10.0% → log-odds: -2.197
+[20:03:10] 
+Parameter contributions:
+[20:03:10]   Perceived International Deterrence: +0.700
+[20:03:10]     Probability shift: 10.0% → 18.3% (+8.3%)
+[20:03:10]   US and Allied Military Posture: +0.700
+[20:03:10]     Probability shift: 18.3% → 31.1% (+12.8%)
+[20:03:10]   Chinese Military Capability for Invasion: +0.600
+[20:03:10]     Probability shift: 31.1% → 45.1% (+14.0%)
+[20:03:10]   Chinese Political Willingness: -0.400
+[20:03:10]     Probability shift: 45.1% → 35.5% (-9.6%)
+[20:03:10]   Domestic Stability in China: 0.000
+[20:03:10]     Probability shift: 35.5% → 35.5% (0.0%)
+[20:03:10] 
+Final log-odds: -0.597 → Probability: 35.5%
+[20:03:10] 
+Total log-odds impact: 2.40
+[20:03:10] ! Large shift - requires strong evidence to justify
+[20:03:10] ----------------------------------------
