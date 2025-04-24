@@ -5,14 +5,17 @@ import json
 import os
 import numpy as np
 import matplotlib.pyplot as plt
+import pandas as pd
+import plotly.graph_objects as go
 
 from agents import Runner, trace, InputGuardrailTripwireTriggered
 from agents.extensions.visualization import draw_graph
-from models import *
-from agent_definitions import (background_info_agent, reference_class_agent, parameter_design_agent, 
+from src.models import *
+from src.agents import (background_info_agent, reference_class_agent, parameter_design_agent, 
                    parameter_researcher_agent, synthesis_agent, question_validator_agent,
                    question_clarifier_agent, forecast_orchestrator, red_team_agent)
-from tools import WebSearchTool
+from src.utils.tools import WebSearchTool
+from src.utils.forecast_math import logit, inv_logit
 
 # App configuration
 st.set_page_config(
@@ -306,30 +309,66 @@ async def run_forecast_workflow(question):
                         st.success(f"Researched parameter {idx+1}/{len(parameter_design.parameters)}: {param.name}")
                         st.markdown(f"**Estimate:** {sample.value:.2f} [{sample.low:.2f} - {sample.high:.2f}]")
                         
-                        # Add visualization for parameter confidence interval
-                        fig, ax = plt.subplots(figsize=(5, 0.8))
+                        # Display log-odds contribution if available
+                        if sample.delta_log_odds is not None:
+                            sign = "+" if sample.delta_log_odds > 0 else ""
+                            st.markdown(f"**Log-odds contribution:** {sign}{sample.delta_log_odds:.3f}")
+                            
+                            # Add explanation of what this means
+                            if abs(sample.delta_log_odds) < 0.2:
+                                strength = "very weak"
+                            elif abs(sample.delta_log_odds) < 0.4:
+                                strength = "weak"
+                            elif abs(sample.delta_log_odds) < 0.7:
+                                strength = "moderate"
+                            elif abs(sample.delta_log_odds) <= 1.0:
+                                strength = "strong"
+                            else:
+                                strength = "very strong"
+                                
+                            direction = "increases" if sample.delta_log_odds > 0 else "decreases"
+                            prob_shift = f"50% → {inv_logit(0.5 + sample.delta_log_odds)*100:.0f}%"
+                            st.markdown(f"*This parameter {direction} probability ({strength} evidence, equivalent to {prob_shift})*")
+                            
+                            # Check for calibration issues
+                            if abs(sample.delta_log_odds) > 1.0:
+                                st.warning("⚠️ This log-odds contribution is larger than typical in superforecasting. Consider if this level of impact is justified by the evidence.")
+                            
+                            # Validate parameter/log-odds consistency for 0-10 scale parameters
+                            param_meta = next((p for p in parameter_design.parameters if p.name == sample.name), None)
+                            if param_meta and "0-10" in param_meta.scale_description:
+                                expected_lo_min = (sample.value - 5) * 0.1
+                                expected_lo_max = (sample.value - 5) * 0.2
+                                if not (min(expected_lo_min, expected_lo_max) <= sample.delta_log_odds <= max(expected_lo_min, expected_lo_max)):
+                                    if sample.value == 5 and sample.delta_log_odds != 0:
+                                        st.warning("⚠️ A value of 5 on a 0-10 scale should typically have 0 log-odds contribution (neutral)")
+                                    elif abs(sample.delta_log_odds) > 1.5 * max(abs(expected_lo_min), abs(expected_lo_max)):
+                                        st.warning(f"⚠️ The log-odds contribution seems disproportionate to the parameter value. For {sample.value}/10, expect log-odds around {expected_lo_min:.2f} to {expected_lo_max:.2f}")
                         
-                        # Determine min and max for visualization
-                        viz_min = min(0, sample.low - 0.2 * (sample.high - sample.low))
-                        viz_max = max(1, sample.high + 0.2 * (sample.high - sample.low))
-                        
-                        # Draw confidence interval
-                        ax.hlines(y=0, xmin=viz_min, xmax=viz_max, linewidth=1, color='gray')
-                        ax.hlines(y=0, xmin=sample.low, xmax=sample.high, linewidth=4, color='lightblue')
-                        ax.plot(sample.value, 0, 'ro', markersize=8)
-                        
-                        # Set plot parameters
-                        ax.set_xlim(viz_min, viz_max)
-                        ax.set_ylim(-0.5, 0.5)
-                        ax.set_yticks([])
-                        ax.spines['right'].set_visible(False)
-                        ax.spines['left'].set_visible(False)
-                        ax.spines['top'].set_visible(False)
-                        
-                        st.pyplot(fig)
-                        
-                        st.markdown("**Reasoning:**")
-                        st.write(sample.reasoning)
+                            # Add visualization for parameter scale mapped to log-odds
+                            fig, ax = plt.subplots(figsize=(5, 0.8))
+                            
+                            # Determine min and max for visualization
+                            viz_min = min(0, sample.low - 0.2 * (sample.high - sample.low))
+                            viz_max = max(1, sample.high + 0.2 * (sample.high - sample.low))
+                            
+                            # Draw confidence interval
+                            ax.hlines(y=0, xmin=viz_min, xmax=viz_max, linewidth=1, color='gray')
+                            ax.hlines(y=0, xmin=sample.low, xmax=sample.high, linewidth=4, color='lightblue')
+                            ax.plot(sample.value, 0, 'ro', markersize=8)
+                            
+                            # Set plot parameters
+                            ax.set_xlim(viz_min, viz_max)
+                            ax.set_ylim(-0.5, 0.5)
+                            ax.set_yticks([])
+                            ax.spines['right'].set_visible(False)
+                            ax.spines['left'].set_visible(False)
+                            ax.spines['top'].set_visible(False)
+                            
+                            st.pyplot(fig)
+                            
+                            st.markdown("**Reasoning:**")
+                            st.write(sample.reasoning)
                     
                     return sample
                 
@@ -377,6 +416,11 @@ async def run_forecast_workflow(question):
                 
                 Synthesize these into a final probability estimate. You may consider insights from all reference classes,
                 but primarily use the recommended one as your starting point.
+                
+                Remember to:
+                1. Convert the base rate to log-odds: L = logit(base_rate)
+                2. Add each parameter's delta_log_odds to L
+                3. Calculate final_prob = inv_logit(L)
                 """
                 
                 synthesis_result = await Runner.run(
@@ -386,8 +430,68 @@ async def run_forecast_workflow(question):
                 
                 final_forecast = synthesis_result.final_output_as(FinalForecast)
                 
+                # Apply log-odds calculation
+                L = logit(recommended_ref_class.base_rate)
+                L_base = L  # Store the base log-odds for display
+                
+                # Collect valid parameter adjustments
+                valid_params = [(p.name, p.delta_log_odds) for p in parameter_samples if p.delta_log_odds is not None]
+                parameter_contributions = {}
+                
+                # Check for excessively large cumulative shifts
+                total_shift = sum(abs(delta) for _, delta in valid_params)
+                if total_shift > 4.0:
+                    # Scale down all contributions proportionally if the total is too extreme
+                    scaling_factor = 4.0 / total_shift
+                    adjustment_warning = f"⚠️ Total log-odds shifts were scaled down by {scaling_factor:.2f} to maintain reasonable calibration"
+                else:
+                    scaling_factor = 1.0
+                    adjustment_warning = None
+                
+                # Apply log-odds contributions (with possible scaling)
+                for name, delta in valid_params:
+                    adjusted_delta = delta * scaling_factor
+                    parameter_contributions[name] = adjusted_delta
+                    L += adjusted_delta
+                
+                # Apply superforecaster conservatism
+                # Extreme projections should be tempered unless evidence is overwhelming
+                if abs(L) > 3.0:
+                    conservatism_factor = 0.7  # Reduce extreme shifts
+                    L = L * conservatism_factor
+                    conservatism_warning = "⚠️ Applied superforecaster conservatism to extreme probability"
+                else:
+                    conservatism_warning = None
+                
+                final_prob = inv_logit(L)
+                
+                # Update the final forecast with log-odds calculation
+                final_forecast.final_estimate = final_prob
+                
+                # Calculate confidence interval (more reasonable approach than fixed ±0.15)
+                # Superforecasters use narrower intervals for extreme probabilities
+                if final_prob > 0.9 or final_prob < 0.1:
+                    ci_width = 0.08  # Narrower CI for extreme probabilities
+                elif final_prob > 0.8 or final_prob < 0.2:
+                    ci_width = 0.12  # Medium CI for fairly confident probabilities
+                else:
+                    ci_width = 0.15  # Wider CI for moderate probabilities
+                
+                final_forecast.final_low = max(0.0, final_prob - ci_width)
+                final_forecast.final_high = min(1.0, final_prob + ci_width)
+                
                 # Store in session state
                 st.session_state.final_forecast = final_forecast
+                st.session_state.log_odds_calculation = {
+                    "base_rate": recommended_ref_class.base_rate,
+                    "base_log_odds": L_base,
+                    "parameter_contributions": parameter_contributions,
+                    "final_log_odds": L,
+                    "final_probability": final_prob,
+                    "adjustment_warning": adjustment_warning,
+                    "conservatism_warning": conservatism_warning,
+                    "scaling_factor": scaling_factor
+                }
                 
                 # Display the final forecast as it becomes available
                 with status:
@@ -401,7 +505,6 @@ async def run_forecast_workflow(question):
                     
                     with col2:
                         # Create a simple gauge visualization
-                        import plotly.graph_objects as go
                         fig = go.Figure(go.Indicator(
                             mode="gauge+number",
                             value=safe_percentage(final_forecast.final_estimate) * 100,
@@ -411,6 +514,168 @@ async def run_forecast_workflow(question):
                         ))
                         fig.update_layout(height=200, margin=dict(l=10, r=10, t=10, b=10))
                         st.plotly_chart(fig, use_container_width=True)
+                    
+                    # Add a detailed calculation section using log-odds arithmetic
+                    st.markdown("### Log-Odds Calculation")
+                    st.markdown("This forecast uses log-odds arithmetic which properly handles probability adjustments:")
+                    
+                    # Show any calibration adjustments
+                    if 'adjustment_warning' in st.session_state.log_odds_calculation and st.session_state.log_odds_calculation['adjustment_warning']:
+                        st.warning(st.session_state.log_odds_calculation['adjustment_warning'])
+                    
+                    if 'conservatism_warning' in st.session_state.log_odds_calculation and st.session_state.log_odds_calculation['conservatism_warning']:
+                        st.warning(st.session_state.log_odds_calculation['conservatism_warning'])
+                    
+                    # Create a table to show the calculation steps
+                    calculation_data = []
+                    
+                    # Base rate row
+                    calculation_data.append({
+                        "Component": "Base rate (reference class)",
+                        "Probability": f"{recommended_ref_class.base_rate*100:.1f}%",
+                        "Log-odds": f"{L_base:.3f}",
+                        "Contribution": f"{L_base:.3f}",
+                    })
+                    
+                    # Parameter rows
+                    for name, delta in sorted(parameter_contributions.items(), key=lambda x: abs(x[1]), reverse=True):
+                        sign = "+" if delta > 0 else ""
+                        
+                        # Calculate the equivalent probability shift for this parameter
+                        prior_prob = 0.5  # Using 50% as reference point
+                        new_prob = inv_logit(logit(prior_prob) + delta)
+                        prob_shift = f"{prior_prob*100:.0f}% → {new_prob*100:.0f}%"
+                        
+                        calculation_data.append({
+                            "Component": name,
+                            "Probability": prob_shift,
+                            "Log-odds": f"{sign}{delta:.3f}",
+                            "Contribution": f"{sign}{delta:.3f}",
+                        })
+                    
+                    # Add scaling factor row if applied
+                    if 'scaling_factor' in st.session_state.log_odds_calculation and st.session_state.log_odds_calculation['scaling_factor'] < 1.0:
+                        calculation_data.append({
+                            "Component": "Calibration adjustment",
+                            "Probability": "—",
+                            "Log-odds": f"×{st.session_state.log_odds_calculation['scaling_factor']:.2f}",
+                            "Contribution": "Superforecaster calibration",
+                        })
+                    
+                    # Final probability row
+                    calculation_data.append({
+                        "Component": "Final forecast",
+                        "Probability": f"{final_prob*100:.1f}%",
+                        "Log-odds": f"{L:.3f}",
+                        "Contribution": "Sum of above",
+                    })
+                    
+                    # Create and display the table
+                    calc_df = pd.DataFrame(calculation_data)
+                    st.table(calc_df)
+                    
+                    # Add explanation of the process
+                    st.markdown("""
+                    **Understanding log-odds:**
+                    * Converting to log-odds space allows proper weighting of evidence
+                    * Each parameter contributes a "chip" (delta log-odds)
+                    * Positive values increase probability, negative values decrease it
+                    * The final probability respects proper bounds (0-100%)
+                    * Equal evidence has equal weight regardless of where in the probability scale
+                    * Superforecasters apply conservatism to avoid overconfidence
+                    """)
+                    
+                    # Display total log-odds shift and categorize
+                    total_raw_shift = sum(abs(delta) for _, delta in valid_params)
+                    total_adjusted_shift = sum(abs(delta) for delta in parameter_contributions.values())
+                    
+                    st.markdown(f"""
+                    **Total log-odds impact: {total_adjusted_shift:.2f}** (raw: {total_raw_shift:.2f})
+                    
+                    *Interpretation:*
+                    """)
+                    
+                    if total_adjusted_shift < 1.0:
+                        st.markdown("✅ **Conservative shift** - typical of careful superforecasters")
+                    elif total_adjusted_shift < 2.0:
+                        st.markdown("✅ **Moderate shift** - within normal superforecaster range")
+                    elif total_adjusted_shift < 3.0:
+                        st.markdown("⚠️ **Large shift** - requires strong evidence to justify")
+                    else:
+                        st.markdown("🚨 **Extreme shift** - superforecasters rarely make shifts this large")
+                    
+                    # Add a visualization of how each parameter shifted the probability
+                    st.markdown("### Parameter Impact Visualization")
+                    
+                    # Create data for cumulative parameter impact visualization
+                    cumulative_data = []
+                    running_log_odds = L_base
+                    running_prob = recommended_ref_class.base_rate
+                    
+                    # Base rate starting point
+                    cumulative_data.append({
+                        "Stage": "Base rate",
+                        "Probability": running_prob*100,
+                        "Log-odds": running_log_odds
+                    })
+                    
+                    # Add each parameter's impact
+                    for name, delta in sorted(parameter_contributions.items(), key=lambda x: abs(x[1]), reverse=True):
+                        running_log_odds += delta
+                        new_prob = inv_logit(running_log_odds)
+                        prob_change = (new_prob - running_prob) * 100
+                        cumulative_data.append({
+                            "Stage": name,
+                            "Probability": new_prob*100,
+                            "Change": f"{'+' if prob_change >= 0 else ''}{prob_change:.1f}%",
+                            "Log-odds": running_log_odds
+                        })
+                        running_prob = new_prob
+                    
+                    # Add calibration adjustment if applied
+                    if 'conservatism_warning' in st.session_state.log_odds_calculation and st.session_state.log_odds_calculation['conservatism_warning']:
+                        # Show the effect of conservatism adjustment
+                        final_adjusted_prob = final_prob
+                        if running_prob != final_adjusted_prob:
+                            prob_change = (final_adjusted_prob - running_prob) * 100
+                            cumulative_data.append({
+                                "Stage": "Conservatism",
+                                "Probability": final_adjusted_prob*100,
+                                "Change": f"{'+' if prob_change >= 0 else ''}{prob_change:.1f}%",
+                                "Log-odds": L
+                            })
+                    
+                    # Create waterfall chart for probability changes
+                    impact_df = pd.DataFrame(cumulative_data)
+                    
+                    # Use plotly to create waterfall chart
+                    labels = impact_df["Stage"].tolist()
+                    values = impact_df["Probability"].tolist()
+                    
+                    waterfall_fig = go.Figure(go.Waterfall(
+                        name="Probability Progression", 
+                        orientation="v",
+                        measure=["absolute"] + ["relative"] * (len(values)-1),
+                        x=labels,
+                        y=[values[0]] + [values[i] - values[i-1] for i in range(1, len(values))],
+                        connector={"line":{"color":"rgb(63, 63, 63)"}},
+                        textposition="outside",
+                        text=[f"{values[0]:.1f}%"] + [f"{values[i]-values[i-1]:+.1f}%" for i in range(1, len(values))],
+                    ))
+                    
+                    waterfall_fig.update_layout(
+                        title=f"How Parameters Shifted the Probability",
+                        showlegend=False,
+                        height=400,
+                        xaxis_title="Parameter",
+                        yaxis_title="Probability (%)",
+                        yaxis=dict(
+                            range=[0, max(100, max(values) * 1.1)],
+                            ticksuffix="%"
+                        )
+                    )
+                    
+                    st.plotly_chart(waterfall_fig, use_container_width=True)
                     
                     st.markdown("### Rationale")
                     st.write(final_forecast.rationale)
@@ -475,8 +740,6 @@ async def run_forecast_workflow(question):
                     st.markdown(f"**Alternative estimate:** {safe_percentage(red_team.alternate_estimate)*100:.1f}% [{safe_percentage(red_team.alternate_low)*100:.1f}% - {safe_percentage(red_team.alternate_high)*100:.1f}%]")
                     
                     # Add a comparison chart between main forecast and red team
-                    import plotly.graph_objects as go
-                    
                     fig = go.Figure()
                     
                     # Add main forecast with confidence interval
@@ -565,6 +828,101 @@ def main():
         - Parameter estimation
         - Red team analysis
         """)
+        
+        # Add information about log-odds methodology
+        st.markdown("---")
+        with st.expander("About Log-Odds Arithmetic"):
+            st.markdown("""
+            **Why Log-Odds Matter**
+            
+            This system uses log-odds arithmetic - the same method professional superforecasters use:
+            
+            * **Removes probability creep**: Prevents probabilities from exceeding 0-100%
+            * **Fixes asymmetric impacts**: Equal evidence has equal weight regardless of probability range
+            * **Reveals factor impact**: Shows clear contribution of each parameter
+            
+            Example: In percentage arithmetic, +10% means different things at different points (10→20% is a bigger shift than 70→80%). In log-odds, evidence has the same weight regardless of starting probability.
+            """)
+            
+            # Add a visual example
+            st.markdown("#### Visual Example")
+            example_data = pd.DataFrame({
+                "Starting": ["10%", "70%"],
+                "Ending": ["20%", "80%"],
+                "% Change": ["+10%", "+10%"],
+                "Log-Odds Change": ["+0.41", "+0.41"]
+            })
+            st.table(example_data)
+            st.markdown("*The log-odds approach recognizes these are equivalent evidence shifts*")
+            
+            # Add a conversion chart
+            st.markdown("#### Log-Odds to Probability Conversion")
+            
+            # Generate data points for the conversion chart
+            log_odds_range = np.linspace(-5, 5, 100)
+            probs = [inv_logit(lo) for lo in log_odds_range]
+            
+            # Create chart
+            conversion_fig = go.Figure()
+            conversion_fig.add_trace(go.Scatter(
+                x=log_odds_range, 
+                y=probs,
+                mode='lines',
+                name='Probability',
+                line=dict(color='blue', width=2)
+            ))
+            
+            # Add reference lines and annotations
+            for lo, label in [(-2, "12%"), (-1, "27%"), (0, "50%"), (1, "73%"), (2, "88%")]:
+                p = inv_logit(lo)
+                conversion_fig.add_shape(
+                    type="line", line=dict(dash="dash", width=1, color="gray"),
+                    x0=lo, y0=0, x1=lo, y1=p
+                )
+                conversion_fig.add_shape(
+                    type="line", line=dict(dash="dash", width=1, color="gray"),
+                    x0=-5, y0=p, x1=lo, y1=p
+                )
+                conversion_fig.add_annotation(
+                    x=lo, y=p, text=f"({lo}, {p*100:.0f}%)", 
+                    showarrow=True, arrowhead=2
+                )
+            
+            conversion_fig.update_layout(
+                title="Log-Odds to Probability Conversion",
+                xaxis_title="Log-Odds",
+                yaxis_title="Probability",
+                yaxis=dict(tickformat=".0%", range=[0, 1]),
+                height=400,
+                margin=dict(l=20, r=20, t=40, b=20),
+            )
+            
+            st.plotly_chart(conversion_fig, use_container_width=True)
+            
+            # Add typical chip sizes reference with annotations about meaning
+            st.markdown("""
+            **Superforecaster Log-Odds Guideline:**
+            
+            | Evidence Strength | Log-Odds Shift | Example Probability Shift |
+            | ----------------- | -------------- | ------------------------- |
+            | Very weak | ±0.1 | 50% → 52% |
+            | Weak | ±0.2 to ±0.3 | 50% → 57% |
+            | Moderate | ±0.4 to ±0.6 | 50% → 65% |
+            | Strong | ±0.7 to ±1.0 | 50% → 73% |
+            | Very strong | ±1.5 | 50% → 82% |
+            | Overwhelming | ±2.0 | 50% → 88% |
+            
+            Most parameters contribute between ±0.1 and ±0.6 log-odds.
+            
+            The TOTAL log-odds shift across all parameters rarely exceeds ±2.0
+            (equivalent to moving from 50% to 88% or from 50% to 12%).
+            
+            **Parameters on a 0-10 scale typically map to log-odds as:**
+            - Value 5 = neutral (0 log-odds)
+            - Each point above 5 = +0.1 to +0.2 log-odds
+            - Each point below 5 = -0.1 to -0.2 log-odds
+            """)
+        
         st.markdown("---")
         
         # Reset button

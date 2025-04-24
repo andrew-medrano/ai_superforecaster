@@ -24,6 +24,8 @@ class ParameterSample(BaseModel):
     high: float = Field(description="Upper bound of 90% confidence interval")
     reasoning: str = Field(description="Reasoning for this estimate")
     sources: List[str] = Field(description="Sources supporting this estimate", default_factory=list)
+    delta_log_odds: float | None = Field(
+        description="Estimated shift in natural log-odds caused by this factor", default=None)
 
 class ReferenceClass(BaseModel):
     """Output format for a single reference class"""

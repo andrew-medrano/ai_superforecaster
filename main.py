@@ -4,12 +4,13 @@ import datetime
 
 from agents import Runner, trace, InputGuardrailTripwireTriggered
 from agents.extensions.visualization import draw_graph
-from models import *
-from agent_definitions import (background_info_agent, reference_class_agent, parameter_design_agent, 
+from src.models import *
+from src.agents import (background_info_agent, reference_class_agent, parameter_design_agent, 
                    parameter_researcher_agent, synthesis_agent, question_validator_agent,
                    question_clarifier_agent, forecast_orchestrator, red_team_agent)
-from cli import *
-from tools import WebSearchTool
+from src.ui.cli import *
+from src.utils.tools import WebSearchTool
+from src.utils.forecast_math import logit, inv_logit
 
 async def main():
     display_welcome()
@@ -208,6 +209,11 @@ async def main():
             
             Synthesize these into a final probability estimate. You may consider insights from all reference classes,
             but primarily use the recommended one as your starting point.
+            
+            Remember to:
+            1. Convert the base rate to log-odds: L = logit(base_rate)
+            2. Add each parameter's delta_log_odds to L
+            3. Calculate final_prob = inv_logit(L)
             """
             
             synthesis_result = await Runner.run(
@@ -216,9 +222,66 @@ async def main():
             )
             
             final_forecast = synthesis_result.final_output_as(FinalForecast)
+            
+            # Apply log-odds calculation
+            L = logit(recommended_ref_class.base_rate)
+            L_base = L  # Store the base log-odds for display
+            
+            # Collect valid parameter adjustments and their impacts
+            valid_params = [(p.name, p.delta_log_odds) for p in parameter_samples if p.delta_log_odds is not None]
+            parameter_contributions = {}
+            
+            # Check for excessively large cumulative shifts
+            total_shift = sum(abs(delta) for _, delta in valid_params)
+            scaling_factor = 1.0
+            conservatism_applied = False
+            
+            if total_shift > 4.0:
+                # Scale down all contributions proportionally if the total is too extreme
+                scaling_factor = 4.0 / total_shift
+            
+            # Apply log-odds contributions (with possible scaling)
+            for name, delta in valid_params:
+                adjusted_delta = delta * scaling_factor
+                parameter_contributions[name] = adjusted_delta
+                L += adjusted_delta
+            
+            # Apply superforecaster conservatism
+            # Extreme projections should be tempered unless evidence is overwhelming
+            if abs(L) > 3.0:
+                conservatism_factor = 0.7  # Reduce extreme shifts
+                L = L * conservatism_factor
+                conservatism_applied = True
+            
+            final_prob = inv_logit(L)
+            
+            # Update the final forecast with log-odds calculation
+            final_forecast.final_estimate = final_prob
+            
+            # Calculate confidence interval (more reasonable approach than fixed ±0.15)
+            # Superforecasters use narrower intervals for extreme probabilities
+            if final_prob > 0.9 or final_prob < 0.1:
+                ci_width = 0.08  # Narrower CI for extreme probabilities
+            elif final_prob > 0.8 or final_prob < 0.2:
+                ci_width = 0.12  # Medium CI for fairly confident probabilities
+            else:
+                ci_width = 0.15  # Wider CI for moderate probabilities
+            
+            final_forecast.final_low = max(0.0, final_prob - ci_width)
+            final_forecast.final_high = min(1.0, final_prob + ci_width)
 
             # Display the final results
             display_final_forecast(final_forecast)
+            
+            # Display the log-odds calculation
+            display_log_odds_calculation(
+                base_rate=recommended_ref_class.base_rate,
+                parameter_contributions=parameter_contributions,
+                final_log_odds=L,
+                final_prob=final_prob,
+                adjustment_factor=scaling_factor,
+                conservatism_applied=conservatism_applied
+            )
             
             # Run red team analysis
             display_red_team_message()

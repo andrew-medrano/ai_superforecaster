@@ -1,7 +1,7 @@
 from agents import Agent, Runner, trace, ItemHelpers, input_guardrail, GuardrailFunctionOutput, RunContextWrapper, InputGuardrailTripwireTriggered
-from agents.tool import WebSearchTool
 from agents import ModelSettings
-from models import *
+from src.models import *
+from src.utils.tools import WebSearchTool
 
 background_info_agent = Agent(
     name="Background Information Provider",
@@ -32,7 +32,7 @@ reference_class_agent = Agent(
     instructions="""You identify appropriate reference classes for a forecasting question and determine the historical base rates.
 
 For any forecasting question:
-1. Generate THREE different reference classes that could be applied to this question
+1. Generate THREE DISTINCT reference classes that could be applied to this question
 2. For each reference class:
    - Identify what makes this reference class appropriate
    - Search for historical data on this reference class using the web search tool
@@ -43,22 +43,30 @@ For any forecasting question:
 3. Recommend which of the three reference classes should be the primary one to use
 4. Provide reasoning for your recommendation
 
-Make sure the reference classes are genuinely different from each other to provide diverse perspectives on the question.
+IMPORTANT GUIDELINES:
+- Reference classes MUST have meaningfully different base rates (avoid all clustering around 50%)
+- Base rates should be derived from EMPIRICAL DATA, not expert opinion
+- Include time dimensions - identify how rates change over time when possible
+- Base rates typically fall between 30-70% for most realistic reference classes
+- Reference classes should contain at least 10 historical examples (ideally more)
+- Extreme base rates (<10% or >90%) require extraordinary evidence
+
+Example proper reference classes:
+1. "Adoption rate of new consumer tech reaching 50% household penetration within 5 years" (43%)
+2. "Rate of medical treatments showing positive Phase III results after promising Phase II" (62%)
+3. "Frequency of technology forecasts by industry experts proving accurate within stated timeframe" (37%)
+
+AVOID:
+- Using identical or nearly identical reference classes
+- Base rates that are exactly 50% (this suggests insufficient research)
+- Vague reference classes without concrete examples
+- Classes based primarily on expert opinion rather than historical data
 
 Focus on finding relevant historical analogues. Be precise about:
 - Sample size (how many cases in your reference class)
 - Time period covered
 - Any adjustments needed for this specific case
-- Quality and limitations of available data
-
-Example:
-"What is the probability that China will invade Taiwan by 2030?"
-Reference Classes:
-1. Military invasions of claimed territories by nuclear powers (1950-present)
-2. Historical Chinese military actions to enforce territorial claims
-3. Militarized disputes between countries with strong economic ties
-
-Aim for objective, quantifiable reference classes whenever possible.""",
+- Quality and limitations of available data""",
     tools=[WebSearchTool()],
     output_type=ReferenceClassOutput,
     model="gpt-4.1-mini",
@@ -71,7 +79,7 @@ parameter_design_agent = Agent(
 
 For each forecasting question:
 1. Start with first principles thinking to identify what fundamentally matters to this question
-2. Identify 5 key parameters that:
+2. Identify 4-6 key parameters that:
    - Cover different aspects of the forecast (e.g. market, technology, human factors)
    - Are measurable and as objective as possible
    - Together give a comprehensive view of what drives the outcome
@@ -79,21 +87,26 @@ For each forecasting question:
 3. For each parameter:
    - Define a clear, measurable name and description
    - Provide a clear scale description explaining what the values mean
+   - Specify either a 0-10, 0-100%, or similar numeric scale
    - Identify how this parameter interacts with others (additive, multiplicative, etc.)
    - Do NOT provide numeric estimates yet - focus on structure only
 
-Focus on parameters that are both measurable and meaningful for modeling the forecast outcome.
+IMPORTANT GUIDELINES:
+- For 0-10 scales, clearly define what each end of the scale represents
+- Define what the midpoint (5) represents as a neutral position
+- Ensure parameters are truly orthogonal (independent) when possible
+- Each parameter should represent a distinct factor that could move probability
+- Design parameters that will translate well to log-odds shifts
 
 Good example parameters:
-- What is the probability that China invades Taiwan by 2030?
-  * China's military capability growth (1-10 scale)
-  * Taiwan's defense capabilities (1-10 scale)
-  * US willingness to intervene (0-100% probability)
-  * Economic interdependence (0-100 index)
-  * CCP domestic political stability (1-10 scale)
+- What is the probability that AI systems will achieve human-level performance in scientific research by 2030?
+  * Technical feasibility (0-10 scale where 0=impossible, 5=moderate challenges, 10=no obstacles)
+  * Research funding growth (0-10 scale where 0=major decline, 5=steady state, 10=exponential growth)
+  * Current progress rate (0-10 scale where 0=stalled, 5=linear progress, 10=accelerating rapidly)
+  * Regulatory environment (0-10 scale where 0=highly restrictive, 5=balanced, 10=supportive)
 
 The goal is to define parameters that:
-1. Have clear, measurable definitions
+1. Have clear, measurable definitions with well-defined scales
 2. Drive the outcome in an understandable way
 3. Can be researched separately""",
     output_type=ForecastParameters,
@@ -108,11 +121,28 @@ parameter_researcher_agent = Agent(
 
 For the given parameter:
 1. Run at least 3 web searches to gather relevant data and evidence
-2. Based on the data, estimate:
-   - The most likely value
-   - A 90% confidence interval (10th and 90th percentile)
+2. Systematically translate the evidence into both a parameter value and Δ log-odds:
+   
+   For parameters on a 0-10 scale:
+   - Value 5 = neutral (0 log-odds)
+   - Values 0-4 = negative evidence (map to -0.1 to -0.8 log-odds)
+   - Values 6-10 = positive evidence (map to +0.1 to +0.8 log-odds)
+
+   Guideline for log-odds contributions:
+   - Weak evidence: ±0.1 to ±0.3
+   - Moderate evidence: ±0.4 to ±0.6
+   - Strong evidence: ±0.7 to ±1.0
+   
+   IMPORTANT: Even very strong evidence rarely exceeds ±1.0 log-odds in superforecasting.
+   The parameter value and delta_log_odds should be directly correlated.
+
 3. Cite your sources clearly
 4. Provide concise reasoning for your estimate
+
+Examples of proper mapping:
+- Parameter value 7/10 → delta_log_odds: +0.4 (moderate positive)
+- Parameter value 3/10 → delta_log_odds: -0.4 (moderate negative)
+- Parameter value 9/10 → delta_log_odds: +0.8 (strong positive)
 
 Focus on finding objective data wherever possible. If data is limited, use analogous situations or expert judgments from reputable sources.
 
@@ -129,18 +159,29 @@ synthesis_agent = Agent(
 
 Starting with:
 1. A base rate from reference class forecasting
-2. Estimates for 5 key parameters with confidence intervals
+2. Estimates for key parameters with confidence intervals and log-odds contributions
 
 Your task:
-1. Start with the reference class base rate as your prior
-2. Adjust this probability based on the parameter estimates:
-   - For additive interactions, apply direct adjustments
-   - For multiplicative interactions, apply as multipliers
-   - For exponential interactions, apply appropriate transformations
-3. Determine how each parameter should shift the base rate
-4. Calculate a final probability estimate with 90% confidence interval
-5. Identify the 2 most influential parameters
-6. Write a clear, one-paragraph rationale that references these key parameters
+1. Convert base-rate to log-odds:   L = logit(base_rate)
+2. Add each parameter's `delta_log_odds` to L
+3. final_prob = inv_logit(L)
+4. Determine how each parameter shifts the base rate
+5. Calculate a final probability estimate with 90% confidence interval
+6. Identify the 2-3 most influential parameters
+7. Write a clear, one-paragraph rationale that references these key parameters
+
+IMPORTANT CALIBRATION GUIDELINES:
+- Most forecasts should remain between 20-80% probability range
+- Probabilities >90% or <10% require exceptional evidence
+- The total log-odds shift across all parameters typically falls between -2.0 and +2.0
+- If your calculation yields extreme probabilities (>95% or <5%), reconsider whether the evidence truly warrants such certainty
+- Superforecasters are conservative - they avoid extreme probabilities without overwhelming evidence
+- Make sure parameters collectively tell a coherent story
+
+Common superforecaster ranges:
+- Base rate moves from 50% → 75% requires log-odds shift of +1.1
+- Base rate moves from 50% → 90% requires log-odds shift of +2.2
+- Total parameter adjustments rarely move probability >30 percentage points
 
 Your final forecast should strike a balance between the outside view (base rate) and the inside view (parameter adjustments). Be explicit about how much weight you give to the base rate versus specific parameters.""",
     model="gpt-4.1",
@@ -221,10 +262,25 @@ Focus on:
 - Overlooked reference classes that might be more appropriate
 - Alternative interpretations of the same evidence
 - Important missing parameters
-- Ways the parameter interactions might be misunderstood
+- Ways the parameter contributions might be misunderstood or miscalibrated
 - Cognitive biases that might be affecting the forecast
 
-Your goal is NOT to be contrarian for its own sake, but to provide a genuinely strong alternative view that could improve the forecast.""",
+IMPORTANT CALIBRATION CHECKS:
+- If the forecast is extremely confident (>90% or <10%), challenge the certainty
+- Identify any parameter log-odds contributions that seem exaggerated
+- Challenge any parameter assessments that lack empirical support
+- Identify instances where the total log-odds shift seems unrealistically large
+- Question reference classes that don't contain sufficient historical examples
+
+Common superforecasting errors to identify:
+- Overconfidence (probabilities too extreme)
+- Parameter interactions not properly accounted for
+- Reference classes that are too narrow or not truly analogous
+- Neglecting key external factors or alternative hypotheses
+- Base rates derived from insufficient data
+
+Your challenge should follow superforecaster best practices - be data-driven, 
+appropriately calibrated, and avoid going to extremes without strong evidence.""",
     output_type=RedTeamOutput,
     tools=[WebSearchTool()],
     model="gpt-4.1",

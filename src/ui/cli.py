@@ -1,6 +1,7 @@
-from models import (BackgroundInfoOutput, ReferenceClassOutput, 
+from src.models import (BackgroundInfoOutput, ReferenceClassOutput, 
                  ParameterMeta, ParameterSample, FinalForecast, RedTeamOutput)
 from typing import List
+from src.utils.forecast_math import logit, inv_logit
 
 def display_welcome():
     """Display welcome message."""
@@ -72,6 +73,19 @@ def display_parameter_estimates(samples: List[ParameterSample]):
     print("\n=== Parameter estimates ===")
     for sample in samples:
         print(f"{sample.name}: {sample.value} [{sample.low} - {sample.high}]")
+        if sample.delta_log_odds is not None:
+            sign = "+" if sample.delta_log_odds > 0 else ""
+            if abs(sample.delta_log_odds) < 0.2:
+                strength = "very weak"
+            elif abs(sample.delta_log_odds) < 0.4:
+                strength = "weak"
+            elif abs(sample.delta_log_odds) < 0.7:
+                strength = "moderate"
+            elif abs(sample.delta_log_odds) <= 1.0:
+                strength = "strong"
+            else:
+                strength = "very strong"
+            print(f"  Log-odds: {sign}{sample.delta_log_odds:.3f} ({strength} {'positive' if sample.delta_log_odds > 0 else 'negative'} evidence)")
         print(f"  Sources: {', '.join(sample.sources)}")
 
 def display_synthesis_message():
@@ -103,4 +117,52 @@ def display_forecasting_error(reasoning: str):
     """Display error message when a question cannot be forecasted."""
     print("\n=== CANNOT PROCESS THIS QUESTION ===")
     print(f"Reason: {reasoning}")
-    print("\nPlease try asking a question about a future event or trend that can be forecasted.") 
+    print("\nPlease try asking a question about a future event or trend that can be forecasted.")
+
+def display_log_odds_calculation(base_rate, parameter_contributions, final_log_odds, final_prob, 
+                                adjustment_factor=None, conservatism_applied=False):
+    """Display the log-odds calculation details."""
+    L_base = logit(base_rate)
+    
+    print("\n=== LOG-ODDS CALCULATION ===")
+    print(f"Base rate: {base_rate*100:.1f}% → log-odds: {L_base:.3f}")
+    
+    # Show each parameter's contribution, sorted by magnitude
+    print("\nParameter contributions:")
+    total_shift = 0
+    running_log_odds = L_base
+    running_prob = base_rate
+    
+    for name, delta in sorted(parameter_contributions.items(), key=lambda x: abs(x[1]), reverse=True):
+        sign = "+" if delta > 0 else ""
+        print(f"  {name}: {sign}{delta:.3f}")
+        
+        # Calculate the probability impact
+        running_log_odds += delta
+        new_prob = inv_logit(running_log_odds)
+        prob_delta = (new_prob - running_prob) * 100
+        print(f"    Probability shift: {running_prob*100:.1f}% → {new_prob*100:.1f}% ({'+' if prob_delta > 0 else ''}{prob_delta:.1f}%)")
+        running_prob = new_prob
+        total_shift += abs(delta)
+    
+    # Show any calibration adjustments
+    if adjustment_factor and adjustment_factor < 1.0:
+        print(f"\nCalibration adjustment: ×{adjustment_factor:.2f} (scaling down large shifts)")
+    
+    if conservatism_applied:
+        print("\nSuperforecaster conservatism applied to extreme probability")
+    
+    print(f"\nFinal log-odds: {final_log_odds:.3f} → Probability: {final_prob*100:.1f}%")
+    
+    # Interpret the total shift
+    print(f"\nTotal log-odds impact: {total_shift:.2f}")
+    if total_shift < 1.0:
+        print("✓ Conservative shift - typical of careful superforecasters")
+    elif total_shift < 2.0:
+        print("✓ Moderate shift - within normal superforecaster range")
+    elif total_shift < 3.0:
+        print("! Large shift - requires strong evidence to justify")
+    else:
+        print("!! Extreme shift - superforecasters rarely make shifts this large")
+    
+    print("----------------------------------------") 
