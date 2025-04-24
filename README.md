@@ -10,10 +10,9 @@ The system is organized into several modular components:
 - `src/agents/`: LLM agent definitions with prompts for specialized forecasting tasks
 - `src/utils/`: Utility functions including log-odds conversion and tools
 - `src/ui/`: Display functions for CLI interface
-- `main.py`: CLI entry point for running forecasts
+- `main.py`: Core CLI engine with multi-buffer capability
 - `app.py`: Streamlit web interface for enhanced user experience
-- `buffer_viewer.py`: GUI for visualizing forecast buffers in real-time
-- `run_with_buffers.py`: Launcher for CLI + buffer viewer experience
+- `ai_superforecaster.py`: Main entry point with integrated buffer visualization
 
 ## Workflow
 
@@ -35,32 +34,18 @@ The system is organized into several modular components:
 
 ## Usage
 
-### Standard CLI
+### Recommended: Multi-Buffer GUI Experience
 
-The basic CLI interface with text output:
-
-```
-python main.py
-```
-
-Commands during execution:
-- `/rerun` - Start a new forecast
-- `/view` - Display contents of a specific buffer
-- `/quit` - Exit the application
-- `/gui` - Launch the buffer viewer GUI
-
-### Multi-Buffer GUI Experience (Recommended)
-
-To use the CLI with real-time buffer visualization:
+The easiest way to use the system is with the integrated GUI that shows all forecasting buffers in real-time:
 
 ```
-python run_with_buffers.py
+python ai_superforecaster.py
 ```
 
 Or run with a question directly:
 
 ```
-python run_with_buffers.py "What is the probability that Bitcoin will reach $100,000 before the end of 2025?"
+python ai_superforecaster.py "What is the probability that Bitcoin will reach $100,000 before the end of 2025?"
 ```
 
 This shows separate panels for:
@@ -69,17 +54,29 @@ This shows separate panels for:
 - **LOGODDS** - Calculation steps and evidence strength
 - **REPORT** - Final forecast and red team analysis
 
+### Standard CLI (Advanced Users)
+
+For those who prefer a text-only experience, you can use the core CLI:
+
+```
+python main.py
+```
+
+Commands available during execution:
+- `/rerun` - Start a new forecast
+- `/view` - Display contents of a specific buffer
+- `/quit` - Exit the application
+
 ### Streamlit Web UI
 
-To use the enhanced Streamlit interface:
+For a more interactive web interface:
 
 ```
 pip install -r requirements.txt
 streamlit run app.py
 ```
 
-The Streamlit UI provides a more interactive and visually appealing experience with:
-- Real-time progress tracking
+The Streamlit UI provides additional features:
 - Interactive visualizations of confidence intervals
 - Organized display of reference classes and parameters
 - Visual gauge for probability estimates

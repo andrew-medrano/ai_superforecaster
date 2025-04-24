@@ -23,7 +23,7 @@ Commands (during interactive session):
   /gui - Launch the buffer viewer GUI
 
 For a better experience with visual buffer display, use:
-  python run_with_buffers.py
+  python ai_superforecaster.py
 """
 import asyncio
 import json
@@ -448,7 +448,7 @@ async def main():
                 print("Starting GUI buffer viewer in a separate window...")
                 import subprocess
                 try:
-                    subprocess.Popen(["python", "simple_buffer_viewer.py"])
+                    subprocess.Popen(["python", "ai_superforecaster.py"])
                 except Exception as e:
                     print(f"Error starting GUI: {str(e)}")
             else:

@@ -1,32 +1,32 @@
 #!/usr/bin/env python3
 """
-AI Superforecaster Buffer Viewer
+AI Superforecaster
+-----------------
+Main entry point for the AI Superforecaster with multi-buffer visualization.
 
-A GUI application that displays the different buffers of the AI Superforecaster
-in real-time. This viewer works by monitoring text files in the 'runs' directory
-that are updated during forecast generation.
+This script launches both:
+1. The forecast engine (main.py)
+2. A real-time buffer visualization GUI
 
-The viewer displays four panels in a 2x2 grid:
-- USER: Interactive I/O and status messages
-- BACKGROUND: Reference classes and parameter research
-- LOGODDS: Calculation details for log-odds arithmetic
+The multi-buffer display shows all aspects of the forecasting process:
+- USER: Input/output and status messages
+- BACKGROUND: Reference classes and research
+- LOGODDS: Calculation steps and evidence strength
 - REPORT: Final forecast and red team analysis
 
-This file-based approach avoids threading issues on macOS and
-allows the buffer viewer to run completely independently from
-the main forecasting process.
-
 Usage:
-  python buffer_viewer.py
-
-Note: This is typically launched automatically by run_with_buffers.py
-rather than being run directly.
+  ./ai_superforecaster.py
+  ./ai_superforecaster.py "What is the probability that X will happen by Y?"
 """
+import os
+import subprocess
+import sys
+import time
+import glob
 import tkinter as tk
 from tkinter import scrolledtext
-import os
-import glob
-import time
+import threading
+import datetime
 
 class BufferViewer:
     """
@@ -101,6 +101,8 @@ class BufferViewer:
     
     def check_for_updates(self):
         """Check for updates to buffer files"""
+        updated = False
+        
         # Look for real-time files first (latest_{section}.txt)
         for section in self.sections:
             file_path = os.path.join("runs", f"latest_{section}.txt")
@@ -112,18 +114,71 @@ class BufferViewer:
                             content = f.read()
                             self.update_buffer_content(section, content)
                             self.last_update[section] = modified_time
-                            self.status_var.set(f"Updated {section} from latest file")
+                            updated = True
                 except Exception as e:
                     self.status_var.set(f"Error reading {file_path}: {str(e)}")
+                    # In case of error, reset the buffer with a message
+                    self.update_buffer_content(section, f"Error reading buffer file: {str(e)}\nWaiting for content...")
+        
+        if updated:
+            self.status_var.set(f"Updated buffers at {datetime.datetime.now().strftime('%H:%M:%S')}")
         
         # Schedule the next check
         self.root.after(500, self.check_for_updates)  # Check every 500ms
 
+def run_forecast_process(question=None):
+    """Run the main.py script, either interactively or with a provided question"""
+    # Note: We already cleared the latest files in main(), don't need to do it again here
+    
+    # Run main.py with or without a provided question
+    if question:
+        print(f"Question: {question}")
+        main_process = subprocess.Popen(["python3", "main.py"], stdin=subprocess.PIPE, text=True)
+        main_process.communicate(input=question)
+    else:
+        print("Running AI Superforecaster. Use the buffer viewer window to see all outputs.")
+        main_process = subprocess.Popen(["python3", "main.py"])
+        main_process.wait()
+    
+    print("Forecast complete. The buffer viewer window will remain open.")
+    print("Close the viewer window when you're done reviewing the forecast.")
+
 def main():
+    # Get command-line arguments
+    question = " ".join(sys.argv[1:]) if len(sys.argv) > 1 else None
+    
+    # Clear any existing latest files BEFORE creating the GUI
+    for file in glob.glob("runs/latest_*.txt"):
+        try:
+            os.remove(file)
+        except:
+            pass
+    
+    # Create empty latest files for each buffer section to avoid any
+    # old content being displayed when the viewer first starts
+    sections = ["user", "background", "logodds", "report"]
+    os.makedirs("runs", exist_ok=True)
+    for section in sections:
+        with open(f"runs/latest_{section}.txt", "w") as f:
+            f.write(f"[{datetime.datetime.now().strftime('%H:%M:%S')}] Starting new forecast...\n")
+    
+    # Create and start the GUI
     root = tk.Tk()
     root.geometry("1200x800")
-    app = BufferViewer(root)
+    viewer = BufferViewer(root)
+    
+    # Run forecast in a separate thread so it doesn't block the GUI
+    forecast_thread = threading.Thread(
+        target=run_forecast_process,
+        args=(question,),
+        daemon=True
+    )
+    forecast_thread.start()
+    
+    # Start the Tkinter event loop (this will block until window is closed)
     root.mainloop()
+    
+    # When the window is closed, the program will exit naturally
 
 if __name__ == "__main__":
     main() 
