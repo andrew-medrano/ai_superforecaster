@@ -1,0 +1,20 @@
+[18:10:02] === LOG-ODDS CALCULATION ===
+[18:10:02] Base rate: 10.0% → log-odds: -2.197
+[18:10:02] 
+Parameter contributions:
+[18:10:02]   Military Capability Overmatch: +0.600
+[18:10:02]     Probability shift: 10.0% → 16.8% (+6.8%)
+[18:10:02]   Cross-Strait Crisis Escalation: +0.600
+[18:10:02]     Probability shift: 16.8% → 26.9% (+10.1%)
+[18:10:02]   Economic and Domestic Political Constraints in China: -0.500
+[18:10:02]     Probability shift: 26.9% → 18.3% (-8.7%)
+[18:10:02]   Chinese Political-Military Willingness: +0.400
+[18:10:02]     Probability shift: 18.3% → 25.0% (+6.7%)
+[18:10:02]   Allied Deterrence Credibility: +0.400
+[18:10:02]     Probability shift: 25.0% → 33.2% (+8.2%)
+[18:10:02] 
+Final log-odds: -0.697 → Probability: 33.2%
+[18:10:02] 
+Total log-odds impact: 2.50
+[18:10:02] ! Large shift - requires strong evidence to justify
+[18:10:02] ----------------------------------------

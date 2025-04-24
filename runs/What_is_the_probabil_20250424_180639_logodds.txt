@@ -1,0 +1,20 @@
+[18:06:28] === LOG-ODDS CALCULATION ===
+[18:06:28] Base rate: 7.0% → log-odds: -2.587
+[18:06:28] 
+Parameter contributions:
+[18:06:28]   Relative Share Price Decline Magnitude: -0.800
+[18:06:28]     Probability shift: 7.0% → 3.3% (-3.7%)
+[18:06:28]   Recent Financial Performance Resilience: +0.700
+[18:06:28]     Probability shift: 3.3% → 6.4% (+3.1%)
+[18:06:28]   AI/Data Center Demand Outlook: +0.700
+[18:06:28]     Probability shift: 6.4% → 12.1% (+5.7%)
+[18:06:28]   Competitive Threats and Market Share Pressure: -0.400
+[18:06:28]     Probability shift: 12.1% → 8.4% (-3.6%)
+[18:06:28]   Broader Macroeconomic and Geopolitical Risk: -0.400
+[18:06:28]     Probability shift: 8.4% → 5.8% (-2.6%)
+[18:06:28] 
+Final log-odds: -2.787 → Probability: 5.8%
+[18:06:28] 
+Total log-odds impact: 3.00
+[18:06:28] !! Extreme shift - superforecasters rarely make shifts this large
+[18:06:28] ----------------------------------------

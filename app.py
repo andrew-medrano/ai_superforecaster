@@ -1,3 +1,22 @@
+#!/usr/bin/env python3
+"""
+AI Superforecaster Web UI
+
+This is the Streamlit web interface for the AI Superforecaster.
+It provides an interactive, visual experience for generating
+probabilistic forecasts with detailed visualizations.
+
+While the core logic is shared with the CLI version,
+this implementation focuses on an enhanced user experience
+with real-time progress updates, interactive displays,
+and visualization of confidence intervals and parameters.
+
+Usage:
+  streamlit run app.py
+
+Note: This interface uses the same BufferManager as the CLI,
+but with echo_user=False to prevent console output.
+"""
 import streamlit as st
 import asyncio
 from asyncio import create_task
@@ -16,6 +35,8 @@ from src.agents import (background_info_agent, reference_class_agent, parameter_
                    question_clarifier_agent, forecast_orchestrator, red_team_agent)
 from src.utils.tools import WebSearchTool
 from src.utils.forecast_math import logit, inv_logit
+from src.utils.buffers import BufferManager
+from src.ui.cli import init_buffers
 
 # App configuration
 st.set_page_config(
@@ -32,6 +53,10 @@ def safe_percentage(value):
 
 # Helper functions for streamlit-friendly asyncio
 async def run_forecast_workflow(question):
+    # Create a non-printing buffer manager for Streamlit
+    dummy_buffers = BufferManager(echo_user=False)
+    init_buffers(dummy_buffers)
+    
     with trace("Forecasting workflow"):
         try:
             # Phase 1: Clarification

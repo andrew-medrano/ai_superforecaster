@@ -12,6 +12,8 @@ The system is organized into several modular components:
 - `src/ui/`: Display functions for CLI interface
 - `main.py`: CLI entry point for running forecasts
 - `app.py`: Streamlit web interface for enhanced user experience
+- `buffer_viewer.py`: GUI for visualizing forecast buffers in real-time
+- `run_with_buffers.py`: Launcher for CLI + buffer viewer experience
 
 ## Workflow
 
@@ -33,13 +35,41 @@ The system is organized into several modular components:
 
 ## Usage
 
-### Command Line Interface
+### Standard CLI
+
+The basic CLI interface with text output:
 
 ```
 python main.py
 ```
 
-### Streamlit UI (Recommended)
+Commands during execution:
+- `/rerun` - Start a new forecast
+- `/view` - Display contents of a specific buffer
+- `/quit` - Exit the application
+- `/gui` - Launch the buffer viewer GUI
+
+### Multi-Buffer GUI Experience (Recommended)
+
+To use the CLI with real-time buffer visualization:
+
+```
+python run_with_buffers.py
+```
+
+Or run with a question directly:
+
+```
+python run_with_buffers.py "What is the probability that Bitcoin will reach $100,000 before the end of 2025?"
+```
+
+This shows separate panels for:
+- **USER** - Input/output and status messages
+- **BACKGROUND** - Reference classes and research
+- **LOGODDS** - Calculation steps and evidence strength
+- **REPORT** - Final forecast and red team analysis
+
+### Streamlit Web UI
 
 To use the enhanced Streamlit interface:
 
@@ -56,6 +86,14 @@ The Streamlit UI provides a more interactive and visually appealing experience w
 - Detailed log-odds calculation breakdowns
 - Parameter impact visualization
 
+## Buffer Management
+
+The system uses a modular buffer system that:
+- Captures all forecasting steps in separate buffers
+- Writes content to files in real-time for external viewing
+- Saves complete forecast runs with timestamps
+- Enables multi-view interfaces without changing the core logic
+
 ## Features
 
 - Reference class forecasting with multiple candidate classes
@@ -64,11 +102,11 @@ The Streamlit UI provides a more interactive and visually appealing experience w
 - Interactive web interface with visualizations
 - Background research with web search capabilities
 - Proper probability calibration using superforecaster techniques
+- Multi-buffer agentic loop for better reasoning visibility
 
 ## TODO:
 
 - Add tests
-- Further improve reference class diversity
 - Support alternate questions and outcome formats
 - Integration of expert opinions and additional data sources
 - Advanced reasoning techniques (MCTS, linear models, autoregressive reasoning)

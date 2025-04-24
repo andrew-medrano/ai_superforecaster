@@ -1,6 +1,35 @@
+#!/usr/bin/env python3
+"""
+AI Superforecaster CLI
+
+This is the main entry point for the AI Superforecaster command-line interface.
+It implements a forecasting pipeline using reference class forecasting, parameter research,
+log-odds arithmetic, and red team analysis.
+
+This application uses a buffer system that separates content into different views:
+- user: Interactive I/O and status messages
+- background: Reference classes and parameter research
+- logodds: Calculation details for log-odds
+- report: Final forecast and red team analysis
+
+Usage:
+  python main.py                # Interactive mode
+  echo "question" | python main.py  # Non-interactive mode
+
+Commands (during interactive session):
+  /rerun - Start a new forecast
+  /view - View buffer contents
+  /quit - Exit the application
+  /gui - Launch the buffer viewer GUI
+
+For a better experience with visual buffer display, use:
+  python run_with_buffers.py
+"""
 import asyncio
 import json
 import datetime
+import os
+import glob
 
 from agents import Runner, trace, InputGuardrailTripwireTriggered
 from agents.extensions.visualization import draw_graph
@@ -11,12 +40,13 @@ from src.agents import (background_info_agent, reference_class_agent, parameter_
 from src.ui.cli import *
 from src.utils.tools import WebSearchTool
 from src.utils.forecast_math import logit, inv_logit
+from src.utils.buffers import BufferManager
 
-async def main():
-    display_welcome()
-    draw_graph(forecast_orchestrator, filename="forecast_orchestrator")
-    
-    user_question = input("> ")
+async def run_full_pipeline(user_question, buffers=None):
+    """Run the full forecasting pipeline on a user question."""
+    if buffers is None:
+        buffers = BufferManager()
+        init_buffers(buffers)
     
     with trace("Forecasting workflow"):
         try:
@@ -34,7 +64,12 @@ async def main():
             # If clarification needed, ask follow-up questions
             if clarification.needs_clarification and clarification.follow_up_questions:
                 display_clarification_request(clarification.follow_up_questions)
-                additional_info = input("> ")
+                try:
+                    additional_info = input("> ")
+                except EOFError:
+                    # Handle case when running in non-interactive mode
+                    buffers.write("user", "No additional input available (non-interactive mode). Proceeding with default assumptions.")
+                    additional_info = "Please continue with default assumptions."
                 
                 # Run clarifier again with the additional information
                 clarification_result = await Runner.run(
@@ -334,12 +369,93 @@ async def main():
             red_team = red_team_result.final_output_as(RedTeamOutput)
             
             display_red_team_challenge(red_team)
+            buffers.write("user", "✓ Pipeline finished.")
+            buffers.write("user", "Type /rerun to forecast a new question, /view to see all buffers, or /quit to exit.")
+            
+            # Save run results to files
+            question_slug = user_question.replace(" ", "_")[:20]
+            buffers.save_run(prefix=question_slug)
+            
+            return final_forecast, red_team
             
         except InputGuardrailTripwireTriggered as e:
             check = e.guardrail_result.output.output_info
             display_forecasting_error(check.reasoning)
-            return
+            return None, None
 
+async def main():
+    # Initialize buffer manager
+    buffers = BufferManager()
+    init_buffers(buffers)
+    
+    # Clear any previous latest files
+    for file in glob.glob("runs/latest_*.txt"):
+        try:
+            os.remove(file)
+        except:
+            pass  # Ignore errors
+    
+    display_welcome()
+    # draw_graph(forecast_orchestrator, filename="forecast_orchestrator")
+    
+    try:
+        user_question = input("> ")
+    except EOFError:
+        buffers.write("user", "No input detected. Exiting.")
+        return
+    
+    await run_full_pipeline(user_question, buffers)
+    
+    # Add REPL for agentic loop
+    while True:
+        try:
+            cmd = input("\n> ").strip().lower()
+            
+            if cmd in {"/quit", "q"}:
+                break
+            elif cmd in {"/rerun", "r"}:
+                # Clear latest files before starting a new run
+                for file in glob.glob("runs/latest_*.txt"):
+                    try:
+                        os.remove(file)
+                    except:
+                        pass  # Ignore errors
+                
+                buffers.write("user", "\n=== Starting new forecast ===")
+                try:
+                    question = input("Enter new/revised question:\n> ")
+                except EOFError:
+                    buffers.write("user", "No input provided for new question. Returning to main menu.")
+                    continue
+                await run_full_pipeline(question, buffers)
+            elif cmd in {"/view", "v"}:
+                try:
+                    section = input("Enter buffer to view (or 'all'): ").strip().lower()
+                except EOFError:
+                    print("No input provided. Showing all buffers.")
+                    section = "all"
+                
+                if section == "all":
+                    for s in buffers.sections:
+                        print(f"\n\n=== {s.upper()} BUFFER ===")
+                        print(buffers.dump(s))
+                elif section in buffers.sections:
+                    print(f"\n\n=== {section.upper()} BUFFER ===")
+                    print(buffers.dump(section))
+                else:
+                    print(f"Buffer '{section}' not found. Available buffers: {', '.join(buffers.sections)}")
+            elif cmd == "/gui":
+                print("Starting GUI buffer viewer in a separate window...")
+                import subprocess
+                try:
+                    subprocess.Popen(["python", "simple_buffer_viewer.py"])
+                except Exception as e:
+                    print(f"Error starting GUI: {str(e)}")
+            else:
+                print("Commands: /rerun, /view, /quit, /gui")
+        except EOFError:
+            # Exit if we're in non-interactive mode
+            break
 
 if __name__ == "__main__":
     asyncio.run(main())
