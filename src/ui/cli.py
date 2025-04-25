@@ -13,7 +13,11 @@ def init_buffers(bm: BufferManager):
 def display_welcome():
     """Display welcome message."""
     buffers.write("user", "Welcome to the AI Superforecaster")
-    buffers.write("user", "What would you like to forecast? Please describe the question or scenario.")
+    buffers.write("user", "This system handles questions in the format: 'What is the probability that [specific event] happens by [specific timeframe]?'")
+    buffers.write("user", "Examples:")
+    buffers.write("user", "- What is the probability that Bitcoin will exceed $100,000 by the end of 2025?")
+    buffers.write("user", "- What is the probability that SpaceX will launch humans to Mars before 2030?")
+    buffers.write("user", "Please provide your forecasting question following this format.")
 
 def display_processing_message():
     """Display processing message."""
@@ -81,7 +85,8 @@ def display_parameter_estimates(samples: List[ParameterSample]):
     """Display the parameter estimates."""
     buffers.write("background", "=== Parameter estimates ===")
     for sample in samples:
-        buffers.write("background", f"{sample.name}: {sample.value} [{sample.low} - {sample.high}]")
+        # Display parameter values in parameters section
+        buffers.write("parameters", f"{sample.name}: {sample.value} [{sample.low} - {sample.high}]")
         if sample.delta_log_odds is not None:
             sign = "+" if sample.delta_log_odds > 0 else ""
             if abs(sample.delta_log_odds) < 0.2:
@@ -94,8 +99,12 @@ def display_parameter_estimates(samples: List[ParameterSample]):
                 strength = "strong"
             else:
                 strength = "very strong"
-            buffers.write("background", f"  Log-odds: {sign}{sample.delta_log_odds:.3f} ({strength} {'positive' if sample.delta_log_odds > 0 else 'negative'} evidence)")
+            buffers.write("parameters", f"  Log-odds: {sign}{sample.delta_log_odds:.3f} ({strength} {'positive' if sample.delta_log_odds > 0 else 'negative'} evidence)")
+        
+        # Keep parameter definition in background section
+        buffers.write("background", f"{sample.name}")
         buffers.write("background", f"  Sources: {', '.join(sample.sources)}")
+    
     buffers.write("user", "✓ Parameter research completed.")
 
 def display_synthesis_message():
@@ -129,53 +138,58 @@ def display_forecasting_error(reasoning: str):
     """Display error message when a question cannot be forecasted."""
     buffers.write("user", "\n=== CANNOT PROCESS THIS QUESTION ===")
     buffers.write("user", f"Reason: {reasoning}")
-    buffers.write("user", "\nPlease try asking a question about a future event or trend that can be forecasted.")
+    buffers.write("user", "\nYour question must follow the format: 'What is the probability that [specific event] happens by [specific timeframe]?'")
+    buffers.write("user", "\nExamples of valid questions:")
+    buffers.write("user", "- What is the probability that Bitcoin will exceed $100,000 by the end of 2025?")
+    buffers.write("user", "- What is the probability that SpaceX will launch humans to Mars before 2030?")
+    buffers.write("user", "- What is the probability that renewable energy will provide >50% of global electricity by 2035?")
+    buffers.write("user", "\nYou'll be given a chance to reformulate your question.")
 
-def display_log_odds_calculation(base_rate, parameter_contributions, final_log_odds, final_prob, 
+def display_parameter_calculation(base_rate, parameter_contributions, final_log_odds, final_prob, 
                                 adjustment_factor=None, conservatism_applied=False):
-    """Display the log-odds calculation details."""
+    """Display the parameter calculation details."""
     L_base = logit(base_rate)
     
-    buffers.write("logodds", "=== LOG-ODDS CALCULATION ===")
-    buffers.write("logodds", f"Base rate: {base_rate*100:.1f}% → log-odds: {L_base:.3f}")
+    buffers.write("parameters", "=== PARAMETER CALCULATION ===")
+    buffers.write("parameters", f"Base rate: {base_rate*100:.1f}% → log-odds: {L_base:.3f}")
     
     # Show each parameter's contribution, sorted by magnitude
-    buffers.write("logodds", "\nParameter contributions:")
+    buffers.write("parameters", "\nParameter contributions:")
     total_shift = 0
     running_log_odds = L_base
     running_prob = base_rate
     
     for name, delta in sorted(parameter_contributions.items(), key=lambda x: abs(x[1]), reverse=True):
         sign = "+" if delta > 0 else ""
-        buffers.write("logodds", f"  {name}: {sign}{delta:.3f}")
+        buffers.write("parameters", f"  {name}: {sign}{delta:.3f}")
         
         # Calculate the probability impact
         running_log_odds += delta
         new_prob = inv_logit(running_log_odds)
         prob_delta = (new_prob - running_prob) * 100
-        buffers.write("logodds", f"    Probability shift: {running_prob*100:.1f}% → {new_prob*100:.1f}% ({'+' if prob_delta > 0 else ''}{prob_delta:.1f}%)")
+        buffers.write("parameters", f"    Probability shift: {running_prob*100:.1f}% → {new_prob*100:.1f}% ({'+' if prob_delta > 0 else ''}{prob_delta:.1f}%)")
         running_prob = new_prob
         total_shift += abs(delta)
     
     # Show any calibration adjustments
     if adjustment_factor and adjustment_factor < 1.0:
-        buffers.write("logodds", f"\nCalibration adjustment: ×{adjustment_factor:.2f} (scaling down large shifts)")
+        buffers.write("parameters", f"\nCalibration adjustment: ×{adjustment_factor:.2f} (scaling down large shifts)")
     
     if conservatism_applied:
-        buffers.write("logodds", "\nSuperforecaster conservatism applied to extreme probability")
+        buffers.write("parameters", "\nSuperforecaster conservatism applied to extreme probability")
     
-    buffers.write("logodds", f"\nFinal log-odds: {final_log_odds:.3f} → Probability: {final_prob*100:.1f}%")
+    buffers.write("parameters", f"\nFinal log-odds: {final_log_odds:.3f} → Probability: {final_prob*100:.1f}%")
     
     # Interpret the total shift
-    buffers.write("logodds", f"\nTotal log-odds impact: {total_shift:.2f}")
+    buffers.write("parameters", f"\nTotal log-odds impact: {total_shift:.2f}")
     if total_shift < 1.0:
-        buffers.write("logodds", "✓ Conservative shift - typical of careful superforecasters")
+        buffers.write("parameters", "✓ Conservative shift - typical of careful superforecasters")
     elif total_shift < 2.0:
-        buffers.write("logodds", "✓ Moderate shift - within normal superforecaster range")
+        buffers.write("parameters", "✓ Moderate shift - within normal superforecaster range")
     elif total_shift < 3.0:
-        buffers.write("logodds", "! Large shift - requires strong evidence to justify")
+        buffers.write("parameters", "! Large shift - requires strong evidence to justify")
     else:
-        buffers.write("logodds", "!! Extreme shift - superforecasters rarely make shifts this large")
+        buffers.write("parameters", "!! Extreme shift - superforecasters rarely make shifts this large")
     
-    buffers.write("logodds", "----------------------------------------")
-    buffers.write("user", "✓ Log-odds calculation completed.") 
+    buffers.write("parameters", "----------------------------------------")
+    buffers.write("user", "✓ Parameter calculation completed.") 

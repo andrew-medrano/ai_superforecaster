@@ -1,1 +1,4 @@
-from src.agents.agent_definitions import * 
+from src.agents.research_agents import background_info_agent, reference_class_agent
+from src.agents.parameter_agents import parameter_design_agent, parameter_researcher_agent
+from src.agents.synthesis_agents import synthesis_agent, red_team_agent
+from src.agents.question_agents import question_validator_agent, question_clarifier_agent, forecast_orchestrator 

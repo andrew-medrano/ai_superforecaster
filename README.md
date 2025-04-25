@@ -7,11 +7,11 @@ An LLM-based system for generating probabilistic forecasts using reference class
 The system is organized into several modular components:
 
 - `src/models/`: Pydantic data models for forecast inputs and outputs
-- `src/agents/`: LLM agent definitions with prompts for specialized forecasting tasks
+- `src/agents/`: LLM agent definitions organized by function (research, parameters, synthesis, questions)
 - `src/utils/`: Utility functions including log-odds conversion and tools
 - `src/ui/`: Display functions for CLI interface
-- `main.py`: Core CLI engine with multi-buffer capability
-- `app.py`: Streamlit web interface for enhanced user experience
+- `src/forecasting_engine.py`: Core forecasting pipeline for consistent behavior across interfaces
+- `main.py`: CLI interface with interactive command handling
 - `ai_superforecaster.py`: Main entry point with integrated buffer visualization
 
 ## Workflow
@@ -34,6 +34,23 @@ The system is organized into several modular components:
 
 ## Usage
 
+### Question Format Requirements
+
+The system accepts questions in the following format:
+```
+What is the probability that [specific event] happens by [specific timeframe]?
+```
+
+Examples of valid questions:
+- "What is the probability that Bitcoin will reach $100,000 before the end of 2025?"
+- "What is the probability that SpaceX will launch humans to Mars before 2030?"
+- "What is the probability that renewable energy will provide >50% of global electricity by 2035?"
+
+The system requires:
+- A clearly measurable event with objective criteria
+- A specific timeframe or deadline
+- Probability framing (not asking for values, rankings, or preferences)
+
 ### Recommended: Multi-Buffer GUI Experience
 
 The easiest way to use the system is with the integrated GUI that shows all forecasting buffers in real-time:
@@ -48,63 +65,73 @@ Or run with a question directly:
 python ai_superforecaster.py "What is the probability that Bitcoin will reach $100,000 before the end of 2025?"
 ```
 
+You can also launch just the buffer viewer without starting a new forecast:
+
+```
+python ai_superforecaster.py --view-only
+```
+
 This shows separate panels for:
 - **USER** - Input/output and status messages
 - **BACKGROUND** - Reference classes and research
-- **LOGODDS** - Calculation steps and evidence strength
+- **PARAMETERS** - Calculation steps and evidence strength
 - **REPORT** - Final forecast and red team analysis
 
 ### Standard CLI (Advanced Users)
 
-For those who prefer a text-only experience, you can use the core CLI:
+For those who prefer a text-only experience, you can use the CLI interface:
 
 ```
 python main.py
 ```
 
+Or run with a question directly:
+
+```
+python main.py "What is the probability that Bitcoin will reach $100,000 before the end of 2025?"
+```
+
 Commands available during execution:
 - `/rerun` - Start a new forecast
-- `/view` - Display contents of a specific buffer
+- `/view <buffer>` - Display contents of a specific buffer (user, background, parameters, report)
+- `/gui` - Launch the buffer viewer in a separate window
 - `/quit` - Exit the application
 
-### Streamlit Web UI
+## Communication System
 
-For a more interactive web interface:
+The system uses an observer pattern for communication:
+- The BufferManager maintains content in memory
+- UI components register as observers to receive real-time updates
+- No file I/O is used for communication, eliminating polling and improving performance
+- Provides a clean foundation for future web interface development
 
-```
-pip install -r requirements.txt
-streamlit run app.py
-```
+## Agent Organization
 
-The Streamlit UI provides additional features:
-- Interactive visualizations of confidence intervals
-- Organized display of reference classes and parameters
-- Visual gauge for probability estimates
-- Detailed log-odds calculation breakdowns
-- Parameter impact visualization
+The agents are organized into logical groups for better maintainability:
 
-## Buffer Management
-
-The system uses a modular buffer system that:
-- Captures all forecasting steps in separate buffers
-- Writes content to files in real-time for external viewing
-- Saves complete forecast runs with timestamps
-- Enables multi-view interfaces without changing the core logic
+- `research_agents.py`: Background information and reference class research
+- `parameter_agents.py`: Parameter design and parameter research
+- `synthesis_agents.py`: Forecast synthesis and red team analysis
+- `question_agents.py`: Question validation, clarification, and orchestration
 
 ## Features
 
 - Reference class forecasting with multiple candidate classes
 - Parameter estimation with calibrated log-odds contributions
 - Red team analysis for challenging forecasts
-- Interactive web interface with visualizations
+- Real-time buffer visualization for tracking forecasting process
 - Background research with web search capabilities
 - Proper probability calibration using superforecaster techniques
 - Multi-buffer agentic loop for better reasoning visibility
 
+## Future Web Interface
+
+The codebase includes placeholders for a future React web app interface:
+- `src/utils/api_utils.py` contains scaffolding for the future API
+- The observer pattern will transition smoothly to WebSocket-based communication
+- Clear separation of UI and business logic enables multiple client implementations
+
 ## TODO:
 
+- base classes have too much variance. should interpolate between them. Need to reduce variance in general. 
 - Add tests
-- Support alternate questions and outcome formats
-- Integration of expert opinions and additional data sources
-- Advanced reasoning techniques (MCTS, linear models, autoregressive reasoning)
-- Support for collaborative forecasting

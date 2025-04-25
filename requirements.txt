@@ -2,4 +2,6 @@ pydantic>=2.0.0
 asyncio
 aiohttp
 plotly>=5.10.0
-matplotlib>=3.5.0 
+matplotlib>=3.5.0 pytest>=8.3.5
+pytest-asyncio>=0.26.0
+pytest-mock>=3.14.0

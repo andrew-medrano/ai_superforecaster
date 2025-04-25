@@ -5,78 +5,122 @@ This module provides classes for managing text buffers across different parts
 of the forecasting process. The BufferManager allows different components
 to write to separate buffers, which can be displayed in various ways:
 - Printed to console (echo_user=True)
-- Written to files in real-time (real_time_files=True)
-- Saved as complete runs with timestamps
+- Observed by UI components via callbacks
 
 This is the core of the multi-buffer architecture that allows the system
 to maintain separation of concerns without changing the core logic.
 """
 from collections import defaultdict
 from datetime import datetime
-from typing import Dict, List
-import os
+from typing import Dict, List, Callable, Any, Optional, Union
+from src.utils.buffer_config import get_buffer_names, DEFAULT_BUFFERS
 
 class TextBuffer:
-    """A single text buffer that accumulates timestamped messages."""
+    """A single text buffer that accumulates timestamped entries."""
     def __init__(self) -> None:
-        self.lines: List[str] = []
+        self.entries: List[Dict[str, Any]] = []
 
-    def write(self, *parts: str) -> None:
-        """Add a timestamped message to the buffer."""
+    def write(self, content: str, content_type: str = "text") -> None:
+        """Add a timestamped entry to the buffer."""
         ts = datetime.utcnow().strftime("%H:%M:%S")
-        self.lines.append(f"[{ts}] " + " ".join(parts))
+        self.entries.append({
+            "content": content,
+            "timestamp": ts,
+            "type": content_type
+        })
 
     def dump(self) -> str:
         """Get the entire buffer contents as a string."""
-        return "\n".join(self.lines)
+        return "\n".join([f"[{entry['timestamp']}] {entry['content']}" 
+                         for entry in self.entries])
 
 class BufferManager:
     """
     Manages multiple named text buffers for different parts of the forecasting process.
     
     Key features:
-    - Maintains separate buffers for user, background, logodds, report
+    - Maintains separate buffers for user, background, parameters, report
     - Can echo user buffer to console in real-time
-    - Can write to live files for GUI viewing
-    - Saves complete runs with timestamps
+    - Notifies observers when buffer content changes
+    - Supports different content types for future extensibility
     
     This enables multiple UI approaches (CLI, multi-window, web) with the same core logic.
     """
-    def __init__(self, echo_user: bool = True, real_time_files: bool = True) -> None:
+    def __init__(self, buffer_names: Optional[List[str]] = None, echo_user: bool = True) -> None:
         """
         Initialize a new BufferManager.
         
         Args:
+            buffer_names: Names of buffers to initialize (default: all from config)
             echo_user: Whether to print user buffer contents to console (default: True)
-            real_time_files: Whether to write buffer contents to files in real-time (default: True)
         """
         self._bufs: Dict[str, TextBuffer] = defaultdict(TextBuffer)
         self.echo_user = echo_user
-        self.real_time_files = real_time_files
+        self.observers: List[Callable[[str, str, str, str], None]] = []
         
-        # Create runs directory if needed
-        if self.real_time_files:
-            os.makedirs("runs", exist_ok=True)
+        # Initialize requested buffers or defaults
+        if buffer_names is None:
+            buffer_names = get_buffer_names()
+            
+        # Create empty buffers for each name
+        for name in buffer_names:
+            self._bufs[name] = TextBuffer()
 
-    def write(self, section: str, *parts: str) -> None:
+    def register_observer(self, callback: Callable[[str, str, str], None]) -> None:
         """
-        Write a message to a named buffer section.
+        Register a function to be called when buffer content changes.
+        
+        The callback receives three arguments:
+        - section: The buffer section that was updated (e.g., "user")
+        - message: The message that was added to the buffer
+        - timestamp: The timestamp of the message
+        
+        Note: For backward compatibility, this version only passes the text content,
+        not the content type.
+        """
+        # Wrap the callback to handle the new signature with content_type
+        def wrapped_callback(section, message, timestamp, content_type=None):
+            callback(section, message, timestamp)
+            
+        self.observers.append(wrapped_callback)
+
+    def write(self, section: str, content: Union[str, Any], content_type: str = "text") -> None:
+        """
+        Write content to a named buffer section.
         
         Args:
             section: The buffer section to write to (e.g., "user", "background")
-            *parts: Text parts to join and write
+            content: Content to write (string for text, other objects for different types)
+            content_type: Type of content ("text", "plot", "interactive", etc.)
         """
+        # Update in-memory buffer
         buf = self._bufs[section]
-        buf.write(*parts)
+        
+        # For backward compatibility, join string parts if content is a list/tuple of strings
+        if isinstance(content, (list, tuple)) and all(isinstance(x, str) for x in content):
+            message = " ".join(content)
+            content = message
+        
+        # Convert non-text content to a string representation for current displays
+        display_content = content
+        if content_type != "text":
+            display_content = f"[{content_type.upper()} content - requires GUI to view]"
+        
+        # Echo to console if needed
         if section == "user" and self.echo_user:
-            print(" ".join(parts))
-            
-        # Write to real-time files if enabled
-        if self.real_time_files:
-            message = " ".join(parts)
-            with open(f"runs/latest_{section}.txt", "a") as f:
-                ts = datetime.utcnow().strftime("%H:%M:%S")
-                f.write(f"[{ts}] {message}\n")
+            print(display_content if isinstance(display_content, str) else str(display_content))
+        
+        # Get timestamp for the entry
+        ts = datetime.utcnow().strftime("%H:%M:%S")
+        
+        # Add entry to buffer
+        buf.write(content, content_type)
+        
+        # Notify observers
+        for observer in self.observers:
+            # Pass the string representation for display
+            display_text = display_content if isinstance(display_content, str) else str(display_content)
+            observer(section, display_text, ts, content_type)
 
     def dump(self, section: str) -> str:
         """Get the entire contents of a buffer section."""
@@ -89,17 +133,7 @@ class BufferManager:
         
     def save_run(self, prefix=""):
         """
-        Save all buffers to timestamped files.
-        
-        Args:
-            prefix: Optional prefix for the filename (e.g., a slug of the question)
+        Deprecated: This method is kept for backward compatibility but doesn't save files.
+        In the future, this could be reimplemented to save data to a database or other storage.
         """
-        timestamp = datetime.utcnow().strftime("%Y%m%d_%H%M%S")
-        if prefix:
-            timestamp = f"{prefix}_{timestamp}"
-            
-        os.makedirs("runs", exist_ok=True)
-        
-        for section in self.sections:
-            with open(f"runs/{timestamp}_{section}.txt", "w") as f:
-                f.write(self.dump(section)) 
+        pass 
