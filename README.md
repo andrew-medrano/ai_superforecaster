@@ -133,5 +133,4 @@ The codebase includes placeholders for a future React web app interface:
 
 ## TODO:
 
-- base classes have too much variance. should interpolate between them. Need to reduce variance in general. 
-- Add tests
+- check if something already happened in the real world, go to 100%
